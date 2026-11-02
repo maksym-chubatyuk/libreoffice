@@ -97,7 +97,8 @@ SalLayoutGlyphsImpl* SalLayoutGlyphsImpl::clone() const { return new SalLayoutGl
 
 // Clone, but only glyphs in the given range in the original text string.
 // It is possible the given range may not be cloned, in which case this returns nullptr.
-SalLayoutGlyphsImpl* SalLayoutGlyphsImpl::cloneCharRange(sal_Int32 index, sal_Int32 length) const
+SalLayoutGlyphsImpl* SalLayoutGlyphsImpl::cloneCharRange(sal_Int32 index, sal_Int32 length,
+                                                         bool bRequireSafeConcat) const
 {
     std::unique_ptr<SalLayoutGlyphsImpl> copy(new SalLayoutGlyphsImpl(*GetFont()));
     copy->SetFlags(GetFlags());
@@ -142,7 +143,7 @@ SalLayoutGlyphsImpl* SalLayoutGlyphsImpl::cloneCharRange(sal_Int32 index, sal_In
     // (for non-RTL charPos is always the start of a multi-character glyph).
     if (rtl && (pos->charPos() + pos->charCount() > beginPos + 1 || pos->IsInCluster()))
         return nullptr;
-    if (!isSafeToBreak(pos, rtl))
+    if (!isSafeToBreak(pos, rtl, bRequireSafeConcat))
         return nullptr;
     // LinearPos needs adjusting to start at xOffset/yOffset for the first item,
     // that's how it's computed in GenericSalLayout::LayoutText().
@@ -176,13 +177,13 @@ SalLayoutGlyphsImpl* SalLayoutGlyphsImpl::cloneCharRange(sal_Int32 index, sal_In
         // that we're not cutting in the middle of a multi-character glyph.
         if (rtl ? pos->charPos() + pos->charCount() != endPos + 1 : pos->charPos() != endPos)
             return nullptr;
-        if (!isSafeToBreak(pos, rtl))
+        if (!isSafeToBreak(pos, rtl, bRequireSafeConcat))
             return nullptr;
     }
     return copy.release();
 }
 
-bool SalLayoutGlyphsImpl::isSafeToBreak(const_iterator pos, bool rtl) const
+bool SalLayoutGlyphsImpl::isSafeToBreak(const_iterator pos, bool rtl, bool bRequireSafeConcat) const
 {
     if (rtl)
     {
@@ -198,7 +199,14 @@ bool SalLayoutGlyphsImpl::isSafeToBreak(const_iterator pos, bool rtl) const
     // A subset can only be cut out and reused without reshaping at a cluster boundary that is
     // safe to concatenate; otherwise the glyphs there depend on the surrounding text
     // (https://harfbuzz.github.io/harfbuzz-hb-buffer.html#hb-glyph-flags-t).
-    if (pos->IsUnsafeToConcat() || (pos->IsInCluster() && !pos->IsClusterStart()))
+    // Unsafe-to-concat can be set for many glyphs of a font with kerning, even where no kerning
+    // applies, and each subset rejected because of it gets shaped again. Harfbuzz documents the
+    // absence of unsafe-to-break as sufficient for cutting a run into two parts that match
+    // shaping them separately, so the stricter flag is used only where other context matters:
+    // RTL runs and layouts that use glyph fallback.
+    const bool bUnsafe
+        = (rtl || bRequireSafeConcat) ? pos->IsUnsafeToConcat() : pos->IsUnsafeToBreak();
+    if (bUnsafe || (pos->IsInCluster() && !pos->IsClusterStart()))
         return false;
     return true;
 }
@@ -283,6 +291,8 @@ static SalLayoutGlyphs makeGlyphsSubset(const SalLayoutGlyphs& source,
     if (direction == UBIDI_MIXED)
         return SalLayoutGlyphs();
     SalLayoutGlyphs ret;
+    // Which fallback font a run resolves to can depend on the surrounding text.
+    const bool bRequireSafeConcat = source.Impl(1) != nullptr;
     for (int level = 0;; ++level)
     {
         const SalLayoutGlyphsImpl* sourceLevel = source.Impl(level);
@@ -291,7 +301,7 @@ static SalLayoutGlyphs makeGlyphsSubset(const SalLayoutGlyphs& source,
         bool sourceRtl = bool(sourceLevel->GetFlags() & SalLayoutFlags::BiDiRtl);
         if ((direction == UBIDI_LTR && sourceRtl) || (direction == UBIDI_RTL && !sourceRtl))
             return SalLayoutGlyphs();
-        SalLayoutGlyphsImpl* cloned = sourceLevel->cloneCharRange(index, len);
+        SalLayoutGlyphsImpl* cloned = sourceLevel->cloneCharRange(index, len, bRequireSafeConcat);
         // If the glyphs range cannot be cloned, bail out.
         if (cloned == nullptr)
             return SalLayoutGlyphs();
@@ -352,7 +362,7 @@ const SalLayoutGlyphs* SalLayoutGlyphsCache::GetLayoutGlyphs(
         // a subset of the full glyphs and adjusting as necessary.
         if (mLastTemporaryKey.has_value() && mLastTemporaryKey == key)
             return &mLastTemporaryGlyphs;
-        const CachedGlyphsKey keyWhole(outputDevice, text, 0, text.getLength(), nLogicWidth);
+        const CachedGlyphsKey keyWhole(key.withRange(0, text.getLength()));
         GlyphsCache::const_iterator itWhole = mCachedGlyphs.find(keyWhole);
         if (itWhole == mCachedGlyphs.end())
         {
@@ -389,8 +399,7 @@ const SalLayoutGlyphs* SalLayoutGlyphsCache::GetLayoutGlyphs(
                     --pos; // Writer skips a non-breaking space, so skip that character too.
                 if ((mLastSubstringKey->len == pos || mLastSubstringKey->index == nIndex)
                     && mLastSubstringKey
-                           == CachedGlyphsKey(outputDevice, text, mLastSubstringKey->index,
-                                              mLastSubstringKey->len, nLogicWidth))
+                           == key.withRange(mLastSubstringKey->index, mLastSubstringKey->len))
                 {
                     GetLayoutGlyphs(outputDevice, text, 0, text.getLength(), nLogicWidth,
                                     layoutCache);
@@ -517,61 +526,86 @@ SalLayoutGlyphsCache::CachedGlyphsKey::CachedGlyphsKey(
     , len(l)
     , logicWidth(w)
     // we also need to save things used in OutputDevice::ImplPrepareLayoutArgs(), in case they
-    // change in the output device, plus mapMode affects the sizes.
-    , fontMetric(outputDevice->GetFontMetric())
-    // TODO It would be possible to get a better hit ratio if mapMode wasn't part of the key
-    // and results that differ only in mapmode would have coordinates adjusted based on that.
+    // change in the output device, plus the map mode scale affects the sizes.
+    // The font instance plus vcl::Font determine everything that a FontMetric would provide,
+    // without the cost of building one for each lookup. Getting the instance also updates the
+    // font of the device, so it must come before the vcl::Font. Valid cache entries keep their
+    // font instance alive, so its address cannot be reused while such an entry exists.
+    , fontInstance(outputDevice->GetFontInstance())
+    , font(outputDevice->GetFont())
+    // TODO It would be possible to get a better hit ratio if the scale wasn't part of the key
+    // and results that differ only in it would have coordinates adjusted based on that.
     // That would occasionally lead to rounding errors (at least differences that would
     // make checkGlyphsEqual() fail).
-    , mapMode(outputDevice->GetMapMode())
+    // The origin of the map mode is not used: glyphs are laid out relative to the start of the
+    // text and the origin only gets applied when positioning the layout, so including it would
+    // make for example each scroll position miss the cache.
+    , mapUnit(outputDevice->GetMapMode().GetMapUnit())
+    , mapScaleX(outputDevice->GetMapMode().GetScaleX())
+    , mapScaleY(outputDevice->GetMapMode().GetScaleY())
     , digitLanguage(outputDevice->GetDigitLanguage())
     , layoutMode(outputDevice->GetLayoutMode())
+    , mapSimple(outputDevice->GetMapMode().IsSimple())
     , rtl(outputDevice->IsRTLEnabled())
 {
-    const LogicalFontInstance* fi = outputDevice->GetFontInstance();
-    fi->GetScale(&fontScaleX, &fontScaleY);
+    fontInstance->GetScale(&fontScaleX, &fontScaleY);
 
-    const vcl::font::FontSelectPattern& rFSD = fi->GetFontSelectPattern();
+    const vcl::font::FontSelectPattern& rFSD = fontInstance->GetFontSelectPattern();
     disabledLigatures = rFSD.GetPitch() == PITCH_FIXED;
-    artificialItalic = fi->NeedsArtificialItalic();
-    artificialBold = fi->NeedsArtificialBold();
+    artificialItalic = fontInstance->NeedsArtificialItalic();
+    artificialBold = fontInstance->NeedsArtificialBold();
 
-    hashValue = 0;
-    o3tl::hash_combine(hashValue, vcl::text::FirstCharsStringHash()(text));
-    o3tl::hash_combine(hashValue, index);
-    o3tl::hash_combine(hashValue, len);
-    o3tl::hash_combine(hashValue, logicWidth);
-    o3tl::hash_combine(hashValue, outputDevice.get());
+    rangelessHashValue = 0;
+    o3tl::hash_combine(rangelessHashValue, vcl::text::FirstCharsStringHash()(text));
+    o3tl::hash_combine(rangelessHashValue, logicWidth);
+    o3tl::hash_combine(rangelessHashValue, outputDevice.get());
+    o3tl::hash_combine(rangelessHashValue, fontInstance);
     // Need to use IgnoreColor, because sometimes the color changes, but it's irrelevant
     // for text layout (and also obsolete in vcl::Font).
-    o3tl::hash_combine(hashValue, fontMetric.GetHashValueIgnoreColor());
+    o3tl::hash_combine(rangelessHashValue, font.GetHashValueIgnoreColor());
     // For some reason font scale may differ even if vcl::Font is the same,
     // so explicitly check it too.
-    o3tl::hash_combine(hashValue, fontScaleX);
-    o3tl::hash_combine(hashValue, fontScaleY);
-    o3tl::hash_combine(hashValue, mapMode.GetHashValue());
-    o3tl::hash_combine(hashValue, rtl);
-    o3tl::hash_combine(hashValue, disabledLigatures);
-    o3tl::hash_combine(hashValue, artificialItalic);
-    o3tl::hash_combine(hashValue, artificialBold);
-    o3tl::hash_combine(hashValue, layoutMode);
-    o3tl::hash_combine(hashValue, digitLanguage.get());
+    o3tl::hash_combine(rangelessHashValue, fontScaleX);
+    o3tl::hash_combine(rangelessHashValue, fontScaleY);
+    o3tl::hash_combine(rangelessHashValue, mapUnit);
+    o3tl::hash_combine(rangelessHashValue, mapScaleX);
+    o3tl::hash_combine(rangelessHashValue, mapScaleY);
+    o3tl::hash_combine(rangelessHashValue, mapSimple);
+    o3tl::hash_combine(rangelessHashValue, rtl);
+    o3tl::hash_combine(rangelessHashValue, disabledLigatures);
+    o3tl::hash_combine(rangelessHashValue, artificialItalic);
+    o3tl::hash_combine(rangelessHashValue, artificialBold);
+    o3tl::hash_combine(rangelessHashValue, layoutMode);
+    o3tl::hash_combine(rangelessHashValue, digitLanguage.get());
 
-    // In case the font name is the same, but the font family differs, then the font metric won't
-    // contain that custom font family, so explicitly include the font family from the output device
-    // font.
-    o3tl::hash_combine(hashValue, outputDevice->GetFont().GetFamilyType());
+    hashValue = rangelessHashValue;
+    o3tl::hash_combine(hashValue, index);
+    o3tl::hash_combine(hashValue, len);
+}
+
+SalLayoutGlyphsCache::CachedGlyphsKey
+SalLayoutGlyphsCache::CachedGlyphsKey::withRange(sal_Int32 i, sal_Int32 l) const
+{
+    CachedGlyphsKey aKey(*this);
+    aKey.index = i;
+    aKey.len = l;
+    aKey.hashValue = rangelessHashValue;
+    o3tl::hash_combine(aKey.hashValue, i);
+    o3tl::hash_combine(aKey.hashValue, l);
+    return aKey;
 }
 
 bool SalLayoutGlyphsCache::CachedGlyphsKey::operator==(const CachedGlyphsKey& other) const
 {
     return hashValue == other.hashValue && index == other.index && len == other.len
-           && logicWidth == other.logicWidth && mapMode == other.mapMode && rtl == other.rtl
+           && logicWidth == other.logicWidth && fontInstance == other.fontInstance
+           && mapUnit == other.mapUnit && mapScaleX == other.mapScaleX
+           && mapScaleY == other.mapScaleY && mapSimple == other.mapSimple && rtl == other.rtl
            && disabledLigatures == other.disabledLigatures
            && artificialItalic == other.artificialItalic && artificialBold == other.artificialBold
            && layoutMode == other.layoutMode && digitLanguage == other.digitLanguage
            && fontScaleX == other.fontScaleX && fontScaleY == other.fontScaleY
-           && fontMetric.EqualIgnoreColor(other.fontMetric)
+           && font.EqualIgnoreColor(other.font)
            && vcl::text::FastStringCompareEqual()(text, other.text);
     // Slower things last in the comparison.
 }

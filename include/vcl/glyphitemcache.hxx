@@ -31,6 +31,7 @@
 
 #include <optional>
 
+class LogicalFontInstance;
 class OutputDevice;
 namespace vcl::text
 {
@@ -93,19 +94,26 @@ public:
         sal_Int32 index;
         sal_Int32 len;
         tools::Long logicWidth;
-        FontMetric fontMetric;
+        const LogicalFontInstance* fontInstance; // only compared, never dereferenced later
+        vcl::Font font;
         double fontScaleX;
         double fontScaleY;
-        MapMode mapMode;
+        MapUnit mapUnit;
+        double mapScaleX;
+        double mapScaleY;
         LanguageType digitLanguage;
         vcl::text::ComplexTextLayoutFlags layoutMode;
+        bool mapSimple : 1;
         bool rtl : 1;
         bool disabledLigatures : 1; // because of fixed pitch
         bool artificialItalic : 1;
         bool artificialBold : 1;
+        size_t rangelessHashValue; // hash of everything except index and len
         size_t hashValue;
         CachedGlyphsKey(const VclPtr<const OutputDevice>& dev, OUString t, sal_Int32 i, sal_Int32 l,
                         tools::Long w);
+        /// The same key for another range of the text, cheaper than building a new one.
+        CachedGlyphsKey withRange(sal_Int32 i, sal_Int32 l) const;
         bool operator==(const CachedGlyphsKey& other) const;
     };
 

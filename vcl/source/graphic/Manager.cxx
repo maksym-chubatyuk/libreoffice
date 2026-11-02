@@ -24,6 +24,10 @@
 #include <officecfg/Office/Common.hxx>
 #include <unotools/configmgr.hxx>
 
+#include <algorithm>
+#include <utility>
+#include <vector>
+
 using namespace css;
 
 namespace
@@ -75,8 +79,12 @@ IMPL_LINK_NOARG(MemoryManager, ReduceMemoryTimerHandler, Timer*, void)
 {
     std::unique_lock aGuard(maMutex);
     maSwapOutTimer.Stop();
+    mbRetryReduceMemory = false;
     reduceMemory(aGuard);
-    // will be started again on size change
+    // Will be started again on size change, but do not rely on that if we are still over the limit
+    // only because the remaining graphics were used too recently, there may be no further change.
+    if (mbRetryReduceMemory && mnTotalSize >= mnMemoryLimit && !maSwapOutTimer.IsActive())
+        maSwapOutTimer.Start();
 }
 
 void MemoryManager::registerObject(MemoryManaged* pMemoryManaged)
@@ -193,9 +201,12 @@ void MemoryManager::loopAndReduceMemory(std::unique_lock<std::mutex>& rGuard, bo
     // m_pImpGraphicList invalidating a loop over m_pImpGraphicList, e.g.
     // reexport of tdf118346-1.odg
 
-    o3tl::sorted_vector<MemoryManaged*> aObjectListCopy = maObjectList;
+    typedef std::pair<std::chrono::high_resolution_clock::time_point, MemoryManaged*> Candidate;
+    std::vector<Candidate> aCandidates;
+    aCandidates.reserve(maObjectList.size());
 
-    for (MemoryManaged* pMemoryManaged : aObjectListCopy)
+    const auto aCurrent = std::chrono::high_resolution_clock::now();
+    for (MemoryManaged* pMemoryManaged : maObjectList)
     {
         if (!pMemoryManaged->canReduceMemory())
             continue;
@@ -203,18 +214,37 @@ void MemoryManager::loopAndReduceMemory(std::unique_lock<std::mutex>& rGuard, bo
         sal_Int64 nCurrentSizeInBytes = pMemoryManaged->getCurrentSizeInBytes();
         if (nCurrentSizeInBytes > mnSmallFrySize || bDropAll) // ignore small-fry
         {
-            auto aCurrent = std::chrono::high_resolution_clock::now();
-            auto aDeltaTime = aCurrent - pMemoryManaged->getLastUsed();
+            auto aLastUsed = pMemoryManaged->getLastUsed();
+            auto aDeltaTime = aCurrent - aLastUsed;
             auto aSeconds = std::chrono::duration_cast<std::chrono::seconds>(aDeltaTime);
 
             if (aSeconds > mnAllowedIdleTime)
-            {
-                // unlock because svgio can call back into us
-                rGuard.unlock();
-                pMemoryManaged->reduceMemory();
-                rGuard.lock();
-            }
+                aCandidates.emplace_back(aLastUsed, pMemoryManaged);
+            else
+                mbRetryReduceMemory = true;
         }
+    }
+
+    // least recently used first, to keep the graphics that are most likely to be needed again
+    std::sort(aCandidates.begin(), aCandidates.end(),
+              [](const Candidate& rLHS, const Candidate& rRHS) { return rLHS.first < rRHS.first; });
+
+    for (const Candidate& rCandidate : aCandidates)
+    {
+        // Swapping out everything idle would only force decoding it again later.
+        if (!bDropAll && mnTotalSize < mnMemoryLimit)
+            break;
+
+        MemoryManaged* pMemoryManaged = rCandidate.second;
+        // reducing the previous candidate ran unlocked, so this one may be gone by now
+        if (maObjectList.find(pMemoryManaged) == maObjectList.end()
+            || !pMemoryManaged->canReduceMemory())
+            continue;
+
+        // unlock because svgio can call back into us
+        rGuard.unlock();
+        pMemoryManaged->reduceMemory();
+        rGuard.lock();
     }
 }
 

@@ -789,6 +789,8 @@ bool GenericSalLayout::LayoutText(vcl::text::ImplLayoutArgs& rArgs, const SalLay
                     = hb_glyph_info_get_glyph_flags(&pHbGlyphInfos[i]);
                 if (eHbGlyphFlags & HB_GLYPH_FLAG_UNSAFE_TO_CONCAT)
                     nGlyphFlags |= GlyphItemFlags::IS_UNSAFE_TO_CONCAT;
+                if (eHbGlyphFlags & HB_GLYPH_FLAG_UNSAFE_TO_BREAK)
+                    nGlyphFlags |= GlyphItemFlags::IS_UNSAFE_TO_BREAK;
 
                 if (!m_bHasFontKashidaPositions
                     || (hb_glyph_info_get_glyph_flags(&pHbGlyphInfos[i])

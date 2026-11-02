@@ -185,24 +185,21 @@ rtl::Reference<LogicalFontInstance> ImplFontCache::GetFontInstance( PhysicalFont
 
         if (maFontInstanceList.size() >= FONTCACHE_MAX)
         {
-            struct limit_exception : public std::exception {};
-            try
-            {
-                maFontInstanceList.remove_if([this] (FontInstanceList::key_value_pair_t const& rFontPair)
-                    {
-                        if (maFontInstanceList.size() < FONTCACHE_MAX)
-                            throw limit_exception();
-                        LogicalFontInstance* pFontEntry = rFontPair.second.get();
-                        if (pFontEntry->m_nCount > 1)
-                            return false;
-                        m_aBoundRectCache.remove_if([&pFontEntry] (GlyphBoundRectCache::key_value_pair_t const& rGlyphPair)
-                            { return rGlyphPair.first.m_pFont == pFontEntry; });
-                        if (mpLastHitCacheEntry == pFontEntry)
-                            mpLastHitCacheEntry = nullptr;
-                        return true;
-                    });
-            }
-            catch (limit_exception&) {}
+            size_t nToRemove = maFontInstanceList.size() - FONTCACHE_MAX + 1;
+            maFontInstanceList.remove_if([this, &nToRemove] (FontInstanceList::key_value_pair_t const& rFontPair)
+                {
+                    if (nToRemove == 0)
+                        return false;
+                    LogicalFontInstance* pFontEntry = rFontPair.second.get();
+                    if (pFontEntry->m_nCount > 1)
+                        return false;
+                    m_aBoundRectCache.remove_if([&pFontEntry] (GlyphBoundRectCache::key_value_pair_t const& rGlyphPair)
+                        { return rGlyphPair.first.m_pFont == pFontEntry; });
+                    if (mpLastHitCacheEntry == pFontEntry)
+                        mpLastHitCacheEntry = nullptr;
+                    --nToRemove;
+                    return true;
+                });
         }
 
         assert(pFontInstance);

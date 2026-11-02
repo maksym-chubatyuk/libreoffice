@@ -113,7 +113,7 @@ void SfxBroadcaster::RemoveListener(SfxListener& rListener)
     if (!m_RemovedPositions.empty())
     {
         auto i = m_RemovedPositions.back();
-        if (i < m_Listeners.size() - 2 && m_Listeners[i + 1] == &rListener)
+        if (i + 1 < m_Listeners.size() && m_Listeners[i + 1] == &rListener)
         {
             positionOfRemovedElement = i + 1;
         }
@@ -122,12 +122,31 @@ void SfxBroadcaster::RemoveListener(SfxListener& rListener)
             positionOfRemovedElement = i - 1;
         }
     }
-    // then scan the whole list if we didn't find it
+    // then scan the list if we didn't find it, from both ends because listeners get
+    // often removed in the same or in the opposite order of adding them
     if (positionOfRemovedElement == -1)
     {
-        auto aIter = std::find(m_Listeners.begin(), m_Listeners.end(), &rListener);
-        positionOfRemovedElement = std::distance(m_Listeners.begin(), aIter);
+        size_t nFront = 0;
+        size_t nBack = m_Listeners.size();
+        while (nFront < nBack)
+        {
+            if (m_Listeners[nFront] == &rListener)
+            {
+                positionOfRemovedElement = nFront;
+                break;
+            }
+            --nBack;
+            if (m_Listeners[nBack] == &rListener)
+            {
+                positionOfRemovedElement = nBack;
+                break;
+            }
+            ++nFront;
+        }
     }
+    assert(positionOfRemovedElement != -1 && "removing a listener that is not registered");
+    if (positionOfRemovedElement == -1)
+        return;
     // DO NOT erase the listener, set the pointer to 0
     // because the current continuation may contain this->Broadcast
     m_Listeners[positionOfRemovedElement] = nullptr;

@@ -80,6 +80,9 @@ public:
         = delete; // due to SfxPoolItem
 
     SAL_DLLPRIVATE virtual bool operator==(const SfxPoolItem&) const override;
+    // operator== already requires equal hashes, so this is consistent with it
+    virtual bool supportsHashCode() const override { return true; }
+    virtual size_t hashCode() const override;
 
     SAL_DLLPRIVATE virtual bool GetPresentation(SfxItemPresentation ePresentation,
                                                 MapUnit eCoreMetric, MapUnit ePresentationMetric,

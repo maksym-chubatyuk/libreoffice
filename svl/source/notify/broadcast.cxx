@@ -22,8 +22,10 @@
 #include <svl/hint.hxx>
 #include <o3tl/safeint.hxx>
 #include <cassert>
+#include <cstddef>
 #include <cstdint>
 #include <algorithm>
+#include <memory>
 
 /**
  Design Notes
@@ -209,15 +211,29 @@ void SvtBroadcaster::Broadcast( const SfxHint &rHint )
     Normalize();
 
     ListenersType::const_iterator dest(maDestructedListeners.begin());
-    ListenersType aListeners(maListeners); // this copy is important to avoid erasing entries while iterating
-    for (auto& rpListener : aListeners)
+    // This copy is important to avoid erasing entries while iterating. Most broadcasters have only
+    // few listeners, so avoid a heap allocation for those.
+    constexpr size_t nStackListeners = 8;
+    SvtListener* aStackListeners[nStackListeners];
+    std::unique_ptr<SvtListener*[]> pHeapListeners;
+    const size_t nListeners = maListeners.size();
+    SvtListener** pListeners = aStackListeners;
+    if (nListeners > nStackListeners)
     {
+        pHeapListeners.reset(new SvtListener*[nListeners]);
+        pListeners = pHeapListeners.get();
+    }
+    std::copy(maListeners.begin(), maListeners.end(), pListeners);
+    for (size_t i = 0; i < nListeners; ++i)
+    {
+        SvtListener* pListener = pListeners[i];
+
         // skip the destructed ones
-        while (dest != maDestructedListeners.end() && (*dest < rpListener))
+        while (dest != maDestructedListeners.end() && (*dest < pListener))
             ++dest;
 
-        if (dest == maDestructedListeners.end() || *dest != rpListener)
-            rpListener->Notify(rHint);
+        if (dest == maDestructedListeners.end() || *dest != pListener)
+            pListener->Notify(rHint);
     }
 }
 

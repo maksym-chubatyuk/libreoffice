@@ -41,6 +41,8 @@ SdrCustomShapeGeometryItem::SdrCustomShapeGeometryItem( const uno::Sequence< bea
 css::uno::Any* SdrCustomShapeGeometryItem::GetPropertyValueByName( const OUString& rPropName )
 {
     ASSERT_CHANGE_REFCOUNTED_ITEM;
+    // the returned value may get changed, also when this item is a copy with a computed hash
+    InvalidateHash();
     css::uno::Any* pRet = nullptr;
     PropertyHashMap::iterator aHashIter( m_aPropHashMap.find( rPropName ) );
     if ( aHashIter != m_aPropHashMap.end() )
@@ -242,6 +244,13 @@ bool SdrCustomShapeGeometryItem::operator==( const SfxPoolItem& rCmp ) const
         return false;
 
     return m_aPropSeq == other.m_aPropSeq;
+}
+
+size_t SdrCustomShapeGeometryItem::hashCode() const
+{
+    UpdateHash();
+    // Items without a usable hash are only equal to each other, so share a value.
+    return m_aHashState == HashState::Valid ? m_aHash : 0;
 }
 
 void SdrCustomShapeGeometryItem::UpdateHash() const

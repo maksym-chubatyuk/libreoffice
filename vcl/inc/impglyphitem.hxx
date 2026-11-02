@@ -29,7 +29,7 @@
 #include "font/LogicalFontInstance.hxx"
 #include "glyphid.hxx"
 
-enum class GlyphItemFlags : sal_uInt8
+enum class GlyphItemFlags : sal_uInt16
 {
     NONE = 0,
     IS_IN_CLUSTER = 0x01,
@@ -39,11 +39,12 @@ enum class GlyphItemFlags : sal_uInt8
     IS_DROPPED = 0x10,
     IS_CLUSTER_START = 0x20,
     IS_UNSAFE_TO_CONCAT = 0x40, // HB_GLYPH_FLAG_UNSAFE_TO_CONCAT from harfbuzz
-    IS_SAFE_TO_INSERT_KASHIDA = 0x80 // HB_GLYPH_FLAG_SAFE_TO_INSERT_TATWEEL from harfbuzz
+    IS_SAFE_TO_INSERT_KASHIDA = 0x80, // HB_GLYPH_FLAG_SAFE_TO_INSERT_TATWEEL from harfbuzz
+    IS_UNSAFE_TO_BREAK = 0x100 // HB_GLYPH_FLAG_UNSAFE_TO_BREAK from harfbuzz
 };
 namespace o3tl
 {
-template <> struct typed_flags<GlyphItemFlags> : is_typed_flags<GlyphItemFlags, 0xff>
+template <> struct typed_flags<GlyphItemFlags> : is_typed_flags<GlyphItemFlags, 0x1ff>
 {
 };
 };
@@ -85,6 +86,7 @@ public:
     bool IsDropped() const { return bool(m_nFlags & GlyphItemFlags::IS_DROPPED); }
     bool IsClusterStart() const { return bool(m_nFlags & GlyphItemFlags::IS_CLUSTER_START); }
     bool IsUnsafeToConcat() const { return bool(m_nFlags & GlyphItemFlags::IS_UNSAFE_TO_CONCAT); }
+    bool IsUnsafeToBreak() const { return bool(m_nFlags & GlyphItemFlags::IS_UNSAFE_TO_BREAK); }
     bool IsSafeToInsertKashida() const
     {
         return bool(m_nFlags & GlyphItemFlags::IS_SAFE_TO_INSERT_KASHIDA);
@@ -111,14 +113,15 @@ public:
     void adjustLinearPosX(double diff) { m_aLinearPos.adjustX(diff); }
     bool isLayoutEquivalent(const GlyphItem& other) const
     {
+        GlyphItemFlags const nIgnoredFlags
+            = GlyphItemFlags::IS_UNSAFE_TO_CONCAT | GlyphItemFlags::IS_UNSAFE_TO_BREAK;
         return rtl::math::approxEqual(m_aLinearPos.getX(), other.m_aLinearPos.getX(), 8)
                && rtl::math::approxEqual(m_aLinearPos.getY(), other.m_aLinearPos.getY(), 8)
                && m_nOrigWidth == other.m_nOrigWidth && m_nCharPos == other.m_nCharPos
                && m_nXOffset == other.m_nXOffset && m_nYOffset == other.m_nYOffset
                && m_nNewWidth == other.m_nNewWidth && m_aGlyphId == other.m_aGlyphId
                && m_nCharCount == other.m_nCharCount
-               && (m_nFlags & ~GlyphItemFlags::IS_UNSAFE_TO_CONCAT)
-                      == (other.m_nFlags & ~GlyphItemFlags::IS_UNSAFE_TO_CONCAT);
+               && (m_nFlags & ~nIgnoredFlags) == (other.m_nFlags & ~nIgnoredFlags);
     }
 };
 
@@ -148,7 +151,9 @@ public:
     {
     }
     SalLayoutGlyphsImpl* clone() const;
-    SalLayoutGlyphsImpl* cloneCharRange(sal_Int32 index, sal_Int32 length) const;
+    // bRequireSafeConcat also rejects cuts that are merely safe to break, see isSafeToBreak().
+    SalLayoutGlyphsImpl* cloneCharRange(sal_Int32 index, sal_Int32 length,
+                                        bool bRequireSafeConcat = true) const;
     const rtl::Reference<LogicalFontInstance>& GetFont() const { return m_rFontInstance; }
     bool IsValid() const;
     void SetFlags(SalLayoutFlags flags) { mnFlags = flags; }
@@ -158,7 +163,7 @@ public:
 #endif
 
 private:
-    bool isSafeToBreak(const_iterator pos, bool rtl) const;
+    bool isSafeToBreak(const_iterator pos, bool rtl, bool bRequireSafeConcat) const;
     rtl::Reference<LogicalFontInstance> m_rFontInstance;
     SalLayoutFlags mnFlags = SalLayoutFlags::NONE;
 };

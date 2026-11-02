@@ -33,6 +33,7 @@ private:
     std::chrono::seconds mnAllowedIdleTime = std::chrono::seconds(1);
     bool mbSwapEnabled = true;
     bool mbReducingGraphicMemory = false;
+    bool mbRetryReduceMemory = false; // large graphics were skipped for not being idle long enough
     sal_Int64 mnMemoryLimit = 10'000'000;
     Timer maSwapOutTimer;
     sal_Int32 mnTimeout = 1'000;
