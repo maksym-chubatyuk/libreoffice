@@ -29,9 +29,17 @@
 #include <vcl/event.hxx>
 #include <vcl/filter/PngImageReader.hxx>
 #include <vcl/ptrstyle.hxx>
+#include <vcl/svapp.hxx>
 #include <vcl/virdev.hxx>
+#include <sal/log.hxx>
+#include <salhelper/thread.hxx>
 
+#include <atomic>
+#include <deque>
 #include <map>
+#include <memory>
+#include <mutex>
+#include <stdexcept>
 
 #include <bitmaps.hlst>
 #include "recentdocsviewitem.hxx"
@@ -41,6 +49,15 @@ using namespace com::sun::star;
 using namespace com::sun::star::uno;
 using namespace drawinglayer::primitive2d;
 using namespace drawinglayer::processor2d;
+
+/// A request to find out if a document is encrypted; shared between its item and the worker thread.
+struct RecentDocsEncryptionCheck
+{
+    OUString aURL;
+    Link<void*, void> aDoneLink;
+    std::atomic<bool> bCancelled{ false };
+    RecentDocsViewItem* pItem = nullptr; ///< only used on the main thread
+};
 
 namespace
 {
@@ -73,6 +90,78 @@ bool IsDocEncrypted(const OUString& rURL)
     return bIsEncrypted;
 }
 
+struct EncryptionCheckQueue
+{
+    std::mutex aMutex;
+    std::deque<std::shared_ptr<RecentDocsEncryptionCheck>> aPending;
+    bool bThreadRunning = false;
+};
+
+EncryptionCheckQueue& getEncryptionCheckQueue()
+{
+    // Intentionally never destroyed: the worker can still be running during process exit.
+    static EncryptionCheckQueue* pQueue = new EncryptionCheckQueue;
+    return *pQueue;
+}
+
+/// Opens one document at a time, as these can be slow or hang, e.g. on an unavailable network path.
+class EncryptionCheckThread : public salhelper::Thread
+{
+public:
+    EncryptionCheckThread()
+        : salhelper::Thread("RecentDocsEncryptionCheck")
+    {
+    }
+
+private:
+    virtual void execute() override
+    {
+        EncryptionCheckQueue& rQueue = getEncryptionCheckQueue();
+        for (;;)
+        {
+            std::shared_ptr<RecentDocsEncryptionCheck> pCheck;
+            {
+                std::scoped_lock aGuard(rQueue.aMutex);
+                if (rQueue.aPending.empty())
+                {
+                    rQueue.bThreadRunning = false;
+                    return;
+                }
+                pCheck = std::move(rQueue.aPending.front());
+                rQueue.aPending.pop_front();
+            }
+            if (pCheck->bCancelled)
+                continue;
+            // The default thumbnail is already the one for unencrypted documents.
+            if (IsDocEncrypted(pCheck->aURL) && !pCheck->bCancelled)
+                Application::PostUserEvent(pCheck->aDoneLink,
+                                           new std::shared_ptr<RecentDocsEncryptionCheck>(pCheck));
+        }
+    }
+};
+
+void queueEncryptionCheck(std::shared_ptr<RecentDocsEncryptionCheck> pCheck)
+{
+    EncryptionCheckQueue& rQueue = getEncryptionCheckQueue();
+    std::scoped_lock aGuard(rQueue.aMutex);
+    rQueue.aPending.push_back(std::move(pCheck));
+    if (rQueue.bThreadRunning)
+        return;
+    rQueue.bThreadRunning = true;
+    try
+    {
+        rtl::Reference<EncryptionCheckThread> xThread(new EncryptionCheckThread);
+        xThread->launch();
+    }
+    catch (const std::runtime_error&)
+    {
+        // The documents then keep the icon for unencrypted documents.
+        SAL_WARN("sfx", "cannot start the thread checking recent documents for encryption");
+        rQueue.bThreadRunning = false;
+        rQueue.aPending.clear();
+    }
+}
+
 using Ext2IconMap = std::map<sfx2::ApplicationType, OUString>;
 Bitmap Url2Icon(std::u16string_view rURL, const Ext2IconMap& rExtToIcon, const OUString& sDefault)
 {
@@ -83,7 +172,7 @@ Bitmap Url2Icon(std::u16string_view rURL, const Ext2IconMap& rExtToIcon, const O
     return Bitmap(it != rExtToIcon.end() ? it->second : sDefault);
 };
 
-Bitmap getDefaultThumbnail(const OUString& rURL)
+Bitmap getDefaultThumbnail(const OUString& rURL, bool bEncrypted)
 {
     static const Ext2IconMap BitmapForExtension
         = { { sfx2::ApplicationType::TYPE_WRITER, RID_FILE_THUMBNAIL_TEXT },
@@ -102,7 +191,7 @@ Bitmap getDefaultThumbnail(const OUString& rURL)
             { sfx2::ApplicationType::TYPE_MATH, BMP_128X128_MATH_DOC } };
 
     const std::map<sfx2::ApplicationType, OUString>& rWhichMap
-        = IsDocEncrypted(rURL) ? EncryptedBitmapForExtension : BitmapForExtension;
+        = bEncrypted ? EncryptedBitmapForExtension : BitmapForExtension;
 
     return Url2Icon(rURL, rWhichMap, RID_FILE_THUMBNAIL_DEFAULT);
 }
@@ -118,6 +207,84 @@ Bitmap getModuleOverlay(std::u16string_view rURL)
             { sfx2::ApplicationType::TYPE_MATH, SFX_FILE_OVERLAY_MATH } };
 
     return Url2Icon(rURL, OverlayBitmapForExtension, SFX_FILE_OVERLAY_DEFAULT);
+}
+
+/// Thumbnail absent: the icon of the document type, made to look like it is on a piece of paper.
+Bitmap createDefaultThumbnail(const OUString& rURL, tools::Long const nThumbnailSize, bool const bEncrypted)
+{
+    INetURLObject aURLObj(rURL);
+
+    Bitmap aExt(getDefaultThumbnail(rURL, bEncrypted));
+    Size aExtSize(aExt.GetSizePixel());
+
+    // attempt to make it appear as if it is on a piece of paper
+    tools::Long nPaperHeight;
+    tools::Long nPaperWidth;
+    if (sfx2::RecentDocsView::typeMatchesExtension(
+            sfx2::ApplicationType::TYPE_IMPRESS, aURLObj.getExtension()))
+    {
+        // Swap width and height (PAPER_SCREEN_4_3 definition make it needed)
+        PaperInfo aInfo(PAPER_SCREEN_4_3);
+        nPaperHeight = aInfo.getWidth();
+        nPaperWidth = aInfo.getHeight();
+    }
+    else
+    {
+        PaperInfo aInfo(PaperInfo::getSystemDefaultPaper());
+        nPaperHeight = aInfo.getHeight();
+        nPaperWidth = aInfo.getWidth();
+    }
+    double ratio = double(nThumbnailSize) / double(std::max(nPaperHeight, nPaperWidth));
+    Size aThumbnailSize(std::round(nPaperWidth * ratio), std::round(nPaperHeight * ratio));
+
+    if (aExtSize.Width() > aThumbnailSize.Width() || aExtSize.Height() > aThumbnailSize.Height())
+    {
+        aExt = TemplateLocalView::scaleImg(aExt, aThumbnailSize.Width(), aThumbnailSize.Height());
+        aExtSize = aExt.GetSizePixel();
+    }
+
+    // create empty, and copy the default thumbnail in
+    Bitmap aThumbnail(aThumbnailSize, vcl::PixelFormat::N32_BPP);
+    aThumbnail.Erase(COL_TRANSPARENT);
+
+    aThumbnail.CopyPixel(
+            ::tools::Rectangle(Point((aThumbnailSize.Width() - aExtSize.Width()) / 2, (aThumbnailSize.Height() - aExtSize.Height()) / 2), aExtSize),
+            ::tools::Rectangle(Point(0, 0), aExtSize),
+            aExt);
+
+    return aThumbnail;
+}
+
+/// Thumbnail present: it's unencrypted document -> add a module overlay.
+Bitmap createDecoratedThumbnail(const Bitmap& rThumbnail, const OUString& rURL, tools::Long const nThumbnailSize)
+{
+    // Pre-scale the thumbnail to the final size before applying the overlay
+    Bitmap aThumbnail = TemplateLocalView::scaleImg(rThumbnail, nThumbnailSize, nThumbnailSize);
+
+    Bitmap aModule = getModuleOverlay(rURL);
+    aModule.Scale(Size(48,48)); //tdf#155200: Thumbnails don't change their size so overlay must not too
+    if (!aModule.IsEmpty())
+    {
+        const Size aSize(aThumbnail.GetSizePixel());
+        const Size aOverlaySize(aModule.GetSizePixel());
+        ScopedVclPtr<VirtualDevice> pVirDev(VclPtr<VirtualDevice>::Create());
+        pVirDev->SetOutputSizePixel(aSize);
+        pVirDev->DrawBitmap(Point(), aThumbnail);
+        pVirDev->DrawBitmap(Point(aSize.Width() - aOverlaySize.Width() - 5,
+                                    aSize.Height() - aOverlaySize.Height() - 5),
+                              aModule);
+        aThumbnail = pVirDev->GetBitmap(Point(), aSize);
+    }
+
+    return aThumbnail;
+}
+
+/// Empty page shown until the stored thumbnail is decoded; proportioned like a portrait A4 page.
+Bitmap createBlankThumbnail(tools::Long const nThumbnailSize)
+{
+    Bitmap aBlank(Size(nThumbnailSize * 5 / 7, nThumbnailSize), vcl::PixelFormat::N32_BPP);
+    aBlank.Erase(COL_TRANSPARENT);
+    return aBlank;
 }
 };
 
@@ -135,7 +302,9 @@ RecentDocsViewItem::RecentDocsViewItem(sfx2::RecentDocsView &rView, const OUStri
       m_bPinned(isPinned),
       m_bPinnedIconHighlighted(false),
       m_aPinnedDocumentBitmap(BMP_PIN_DOC),
-      m_aPinnedDocumentBitmapHighlighted(BMP_PIN_DOC_HIGHLIGHTED)
+      m_aPinnedDocumentBitmapHighlighted(BMP_PIN_DOC_HIGHLIGHTED),
+      m_nThumbnailSize(nThumbnailSize),
+      m_aLoadIdle("sfx2 RecentDocsViewItem m_aLoadIdle")
 {
     OUString aTitle(rTitle);
     INetURLObject aURLObj(rURL);
@@ -148,93 +317,113 @@ RecentDocsViewItem::RecentDocsViewItem(sfx2::RecentDocsView &rView, const OUStri
     if (aTitle.isEmpty())
         aTitle = aURLObj.GetLastName(INetURLObject::DecodeMechanism::WithCharset);
 
-    Bitmap aThumbnail;
+    maTitle = aTitle;
 
     //fdo#74834: only load thumbnail if the corresponding option is not disabled in the configuration
     if (officecfg::Office::Common::History::RecentDocsThumbnail::get())
     {
         if (!sThumbnailBase64.empty())
         {
-            Sequence<sal_Int8> aDecoded;
-            comphelper::Base64::decode(aDecoded, sThumbnailBase64);
-
-            SvMemoryStream aStream(aDecoded.getArray(), aDecoded.getLength(), StreamMode::READ);
-            vcl::PngImageReader aReader(aStream);
-            aThumbnail = aReader.read();
+            m_aThumbnailBase64 = OUString(sThumbnailBase64);
+            maPreview = createBlankThumbnail(nThumbnailSize);
+            m_aLoadIdle.SetPriority(TaskPriority::LOWEST);
+            m_aLoadIdle.SetInvokeHandler(LINK(this, RecentDocsViewItem, LoadThumbnailHdl));
+            m_aLoadIdle.Start();
+            return;
         }
-        else if (sfx2::RecentDocsView::typeMatchesExtension(sfx2::ApplicationType::TYPE_DATABASE,
-                                                            aURLObj.getExtension()))
+
+        if (sfx2::RecentDocsView::typeMatchesExtension(sfx2::ApplicationType::TYPE_DATABASE,
+                                                       aURLObj.getExtension()))
         {
-            aThumbnail
-                = Bitmap(nThumbnailSize > 192 ? SFX_THUMBNAIL_BASE_256 : SFX_THUMBNAIL_BASE_192);
+            const Bitmap aDatabaseThumbnail(nThumbnailSize > 192 ? SFX_THUMBNAIL_BASE_256 : SFX_THUMBNAIL_BASE_192);
+            if (!aDatabaseThumbnail.IsEmpty())
+            {
+                maPreview = createDecoratedThumbnail(aDatabaseThumbnail, rURL, nThumbnailSize);
+                return;
+            }
         }
     }
+
+    maPreview = createDefaultThumbnail(rURL, nThumbnailSize, /*bEncrypted=*/false);
+    startEncryptionCheck();
+}
+
+RecentDocsViewItem::~RecentDocsViewItem()
+{
+    if (m_pEncryptionCheck)
+    {
+        m_pEncryptionCheck->bCancelled = true;
+        m_pEncryptionCheck->pItem = nullptr;
+    }
+}
+
+void RecentDocsViewItem::loadThumbnailNow()
+{
+    if (m_aLoadIdle.IsActive())
+    {
+        m_aLoadIdle.Stop();
+        LoadThumbnailHdl(nullptr);
+    }
+}
+
+IMPL_LINK_NOARG(RecentDocsViewItem, LoadThumbnailHdl, Timer*, void)
+{
+    Bitmap aThumbnail;
+    try
+    {
+        Sequence<sal_Int8> aDecoded;
+        comphelper::Base64::decode(aDecoded, m_aThumbnailBase64);
+
+        SvMemoryStream aStream(aDecoded.getArray(), aDecoded.getLength(), StreamMode::READ);
+        vcl::PngImageReader aReader(aStream);
+        aThumbnail = aReader.read();
+    }
+    catch (const uno::Exception&)
+    {
+        TOOLS_INFO_EXCEPTION("sfx", "caught exception decoding thumbnail of <" << maURL << ">:");
+    }
+    m_aThumbnailBase64.clear();
 
     if (aThumbnail.IsEmpty())
     {
-        // 1. Thumbnail absent: get the default thumbnail, checking for encryption.
-        Bitmap aExt(getDefaultThumbnail(rURL));
-        Size aExtSize(aExt.GetSizePixel());
-
-        // attempt to make it appear as if it is on a piece of paper
-        tools::Long nPaperHeight;
-        tools::Long nPaperWidth;
-        if (sfx2::RecentDocsView::typeMatchesExtension(
-                sfx2::ApplicationType::TYPE_IMPRESS, aURLObj.getExtension()))
-        {
-            // Swap width and height (PAPER_SCREEN_4_3 definition make it needed)
-            PaperInfo aInfo(PAPER_SCREEN_4_3);
-            nPaperHeight = aInfo.getWidth();
-            nPaperWidth = aInfo.getHeight();
-        }
-        else
-        {
-            PaperInfo aInfo(PaperInfo::getSystemDefaultPaper());
-            nPaperHeight = aInfo.getHeight();
-            nPaperWidth = aInfo.getWidth();
-        }
-        double ratio = double(nThumbnailSize) / double(std::max(nPaperHeight, nPaperWidth));
-        Size aThumbnailSize(std::round(nPaperWidth * ratio), std::round(nPaperHeight * ratio));
-
-        if (aExtSize.Width() > aThumbnailSize.Width() || aExtSize.Height() > aThumbnailSize.Height())
-        {
-            aExt = TemplateLocalView::scaleImg(aExt, aThumbnailSize.Width(), aThumbnailSize.Height());
-            aExtSize = aExt.GetSizePixel();
-        }
-
-        // create empty, and copy the default thumbnail in
-        aThumbnail = Bitmap(aThumbnailSize, vcl::PixelFormat::N32_BPP);
-        aThumbnail.Erase(COL_TRANSPARENT);
-
-        aThumbnail.CopyPixel(
-                ::tools::Rectangle(Point((aThumbnailSize.Width() - aExtSize.Width()) / 2, (aThumbnailSize.Height() - aExtSize.Height()) / 2), aExtSize),
-                ::tools::Rectangle(Point(0, 0), aExtSize),
-                aExt);
+        setPreview(createDefaultThumbnail(maURL, m_nThumbnailSize, /*bEncrypted=*/false));
+        startEncryptionCheck();
     }
     else
-    {
-        // 2. Thumbnail present: it's unencrypted document -> add a module overlay.
-        // Pre-scale the thumbnail to the final size before applying the overlay
-        aThumbnail = TemplateLocalView::scaleImg(aThumbnail, nThumbnailSize, nThumbnailSize);
+        setPreview(createDecoratedThumbnail(aThumbnail, maURL, m_nThumbnailSize));
+}
 
-        Bitmap aModule = getModuleOverlay(rURL);
-        aModule.Scale(Size(48,48)); //tdf#155200: Thumbnails don't change their size so overlay must not too
-        if (!aModule.IsEmpty())
-        {
-            const Size aSize(aThumbnail.GetSizePixel());
-            const Size aOverlaySize(aModule.GetSizePixel());
-            ScopedVclPtr<VirtualDevice> pVirDev(VclPtr<VirtualDevice>::Create());
-            pVirDev->SetOutputSizePixel(aSize);
-            pVirDev->DrawBitmap(Point(), aThumbnail);
-            pVirDev->DrawBitmap(Point(aSize.Width() - aOverlaySize.Width() - 5,
-                                        aSize.Height() - aOverlaySize.Height() - 5),
-                                  aModule);
-            aThumbnail = pVirDev->GetBitmap(Point(), aSize);
-        }
-    }
+void RecentDocsViewItem::setPreview(Bitmap aPreview)
+{
+    const Size aOldSize(maPreview.GetSizePixel());
+    const Size aNewSize(aPreview.GetSizePixel());
+    maPreview = std::move(aPreview);
 
-    maTitle = aTitle;
-    maPreview = std::move(aThumbnail);
+    // Same result as calculateItemsPosition, which would also lay out the text again.
+    maPrev1Pos = Point(maDrawArea.TopCenter().X() - aNewSize.Width() / 2,
+                       maPrev1Pos.Y() + (m_nThumbnailSize - aNewSize.Height()) / 2
+                           - (m_nThumbnailSize - aOldSize.Height()) / 2);
+
+    if (isVisible())
+        mrParent.Invalidate(getDrawArea());
+}
+
+void RecentDocsViewItem::startEncryptionCheck()
+{
+    auto pCheck = std::make_shared<RecentDocsEncryptionCheck>();
+    pCheck->aURL = maURL;
+    pCheck->aDoneLink = LINK(nullptr, RecentDocsViewItem, EncryptionCheckDoneHdl);
+    pCheck->pItem = this;
+    m_pEncryptionCheck = pCheck;
+    queueEncryptionCheck(std::move(pCheck));
+}
+
+IMPL_STATIC_LINK(RecentDocsViewItem, EncryptionCheckDoneHdl, void*, p, void)
+{
+    std::unique_ptr<std::shared_ptr<RecentDocsEncryptionCheck>> pCheck(
+        static_cast<std::shared_ptr<RecentDocsEncryptionCheck>*>(p));
+    if (RecentDocsViewItem* pItem = (*pCheck)->pItem)
+        pItem->setPreview(createDefaultThumbnail(pItem->maURL, pItem->m_nThumbnailSize, /*bEncrypted=*/true));
 }
 
 ::tools::Rectangle RecentDocsViewItem::updateHighlight(bool bVisible, const Point& rPoint)

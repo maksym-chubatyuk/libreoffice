@@ -161,6 +161,10 @@ void RecentDocsView::insertItem(const OUString& rURL, const OUString& rTitle,
 
 void RecentDocsView::Reload()
 {
+    // On first load, thumbnails get decoded when idle, to not delay showing the Start Center. Later
+    // (e.g. on pinning an item) decode them right away, to not have all thumbnails flash blank.
+    const bool bInitialLoad = mItemList.empty();
+
     Clear();
 
     std::vector< SvtHistoryOptions::HistoryItem > aHistoryList = SvtHistoryOptions::GetList( EHistoryType::PickList );
@@ -180,6 +184,15 @@ void RecentDocsView::Reload()
 
         insertItem(aURL, aTitle, rRecentEntry.sThumbnail, rRecentEntry.isReadOnly,
                    rRecentEntry.isPinned, i + 1);
+    }
+
+    if (!bInitialLoad)
+    {
+        for (const auto& pItem : mItemList)
+        {
+            if (auto pRecentItem = dynamic_cast<RecentDocsViewItem*>(pItem.get()))
+                pRecentItem->loadThumbnailNow();
+        }
     }
 
     CalculateItemPositions();

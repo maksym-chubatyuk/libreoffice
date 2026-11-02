@@ -45,6 +45,44 @@ static void do_pagein (const char * filename)
     file_image_close (&image);
 }
 
+#ifdef LINUX
+/* Filesystems like btrfs report an anonymous st_dev with major 0, not the block device they live
+   on: look up the source of the mount containing path instead. */
+static bool getMountSourceDevice(char const * path, dev_t * pDevice)
+{
+    FILE * fp = fopen("/proc/self/mountinfo", "r");
+    if (fp == nullptr)
+        return false;
+    char line[4096];
+    size_t bestLen = 0;
+    bool found = false;
+    while (fgets(line, sizeof(line), fp) != nullptr)
+    {
+        /* "id parent major:minor root mountpoint options... - fstype source superoptions" */
+        char mountPoint[2048];
+        if (sscanf(line, "%*s %*s %*s %*s %2047s", mountPoint) != 1)
+            continue;
+        size_t const len = strlen(mountPoint);
+        if (strncmp(path, mountPoint, len) != 0 || len < bestLen)
+            continue;
+        /* "/mnt/foo" must not match "/mnt/foobar" */
+        if (len > 1 && path[len] != '/' && path[len] != '\0')
+            continue;
+        char const * separator = strstr(line, " - ");
+        char source[2048];
+        if (separator == nullptr || sscanf(separator, " - %*s %2047s", source) != 1)
+            continue;
+        bestLen = len;
+        struct stat sourceStat;
+        found = stat(source, &sourceStat) == 0 && S_ISBLK(sourceStat.st_mode);
+        if (found)
+            *pDevice = sourceStat.st_rdev;
+    }
+    fclose(fp);
+    return found;
+}
+#endif
+
 static bool isRotational(char const * path)
 {
     bool ret = true;
@@ -52,17 +90,24 @@ static bool isRotational(char const * path)
     FILE * fp = nullptr;
     char fullpath[4096];
     struct stat out;
-    int major, minor;
-    char type;
+    char type[2];
     if (stat(path , &out) == -1)
         return ret;
-    major = major(out.st_dev);
-    minor = 0; /* minor(out.st_dev); only the device itself has a queue */
-    sprintf(fullpath,"/sys/dev/block/%d:%d/queue/rotational",major,minor);
-    if ((fp = fopen(fullpath, "r")) == nullptr)
+    dev_t device = out.st_dev;
+    if (major(device) == 0 && !getMountSourceDevice(path, &device))
         return ret;
-    if (fgets(&type, 1, fp))
-        ret = type == '1';
+    /* a whole device has a queue of its own, while a partition is a subdirectory of its device */
+    sprintf(fullpath, "/sys/dev/block/%u:%u/queue/rotational",
+            static_cast<unsigned>(major(device)), static_cast<unsigned>(minor(device)));
+    if ((fp = fopen(fullpath, "r")) == nullptr)
+    {
+        sprintf(fullpath, "/sys/dev/block/%u:%u/../queue/rotational",
+                static_cast<unsigned>(major(device)), static_cast<unsigned>(minor(device)));
+        if ((fp = fopen(fullpath, "r")) == nullptr)
+            return ret;
+    }
+    if (fgets(type, sizeof(type), fp))
+        ret = type[0] == '1';
     fclose(fp);
 #endif
     return ret;

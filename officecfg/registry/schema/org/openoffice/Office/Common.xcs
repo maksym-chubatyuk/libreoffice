@@ -5133,9 +5133,11 @@
       <prop oor:name="UseOpenCL" oor:type="xs:boolean" oor:nillable="false">
         <info>
           <desc>Determines whether OpenCL can be used, when available, to speed up
-          some operations.</desc>
+          some operations. Off by default: Calc computes formula groups with CPU threads,
+          while initializing OpenCL loads the GPU driver on each start and its runtime then
+          keeps waking up the CPU, which costs startup time and battery.</desc>
         </info>
-        <value>true</value>
+        <value>false</value>
       </prop>
       <prop oor:name="OpenCLDenyList" oor:type="oor:string-list" oor:nillable="false">
         <!-- UIHints: Tools - Options General OpenCL -->

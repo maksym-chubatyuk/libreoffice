@@ -65,6 +65,13 @@ static void scanAutoCorrectDirForLanguageTags( const OUString& rURL )
                             continue;
 
                         const OUString aBcp47( aTitle.copy( 5, aTitle.getLength() - 9));
+
+                        // Nearly all files are for languages we already know. Skip those without
+                        // canonicalizing, which can load and parse liblangtag's whole XML registry
+                        // while starting up.
+                        if (SvtLanguageTable::HasLanguageType(LanguageTag(aBcp47).getLanguageType()))
+                            continue;
+
                         // Ignore invalid langtags and canonicalize for good,
                         // allow private-use tags.
                         const LanguageTag aLanguageTag (aBcp47, true);

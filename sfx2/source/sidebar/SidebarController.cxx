@@ -369,7 +369,10 @@ void SAL_CALL SidebarController::notifyContextChangeEvent (const css::ui::Contex
         // tdf#104892 - other context changes are batched into a single rebuild
         // by the request above; only an application switch needs an immediate one
         bool bSwitchedApp = maRequestedContext.msApplication != maCurrentContext.msApplication;
-        if (bSwitchedApp)
+        // The very first context is not a switch: leaving it to the request above lets the document
+        // window finish opening before all panels of the deck get created.
+        bool bFirstContext = maCurrentContext == Context() && !comphelper::LibreOfficeKit::isActive();
+        if (bSwitchedApp && !bFirstContext)
             UpdateConfigurations();
     }
 }

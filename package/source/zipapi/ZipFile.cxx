@@ -34,6 +34,8 @@
 #include <comphelper/bytereader.hxx>
 #include <comphelper/storagehelper.hxx>
 #include <comphelper/processfactory.hxx>
+#include <comphelper/scopeguard.hxx>
+#include <comphelper/seqstream.hxx>
 #include <comphelper/threadpool.hxx>
 #include <rtl/digest.h>
 #include <rtl/crc.h>
@@ -1352,6 +1354,35 @@ sal_Int64 ZipFile::readCEN()
 
         MemoryByteGrabber aMemGrabber(aCENBuffer.data(), nCenLen);
 
+        // Validating the local file headers below takes a seek and several reads per entry. If
+        // the file is densely packed with them (more than one per page on average, e.g. the icon
+        // theme zips with thousands of small entries), read it once and validate from memory.
+        // This performs exactly the same checks; files with few or large entries are unaffected.
+        comphelper::ScopeGuard aRestoreStream([this]() { aGrabber.setInputStream(xStream); });
+        sal_uInt64 nBufferedLen = SAL_MAX_UINT64;
+        sal_Int64 const nFileLen = aGrabber.getLength();
+        if (nTotal >= 256 && nFileLen <= nTotal * 4096 && nFileLen <= 64 * 1024 * 1024)
+        {
+            uno::Sequence<sal_Int8> aFileData(static_cast<sal_Int32>(nFileLen));
+            sal_Int8* const pFileData = aFileData.getArray();
+            aGrabber.seek(0);
+            sal_Int32 nFileRead = 0;
+            while (nFileRead < nFileLen)
+            {
+                sal_Int32 const nChunk
+                    = aGrabber.readBytes(pFileData + nFileRead, static_cast<sal_Int32>(nFileLen) - nFileRead);
+                if (nChunk <= 0)
+                    break;
+                nFileRead += nChunk;
+            }
+            if (nFileRead == nFileLen)
+            {
+                aGrabber.setInputStream(
+                    uno::Reference<XInputStream>(new comphelper::SequenceInputStream(aFileData)));
+                nBufferedLen = nFileLen;
+            }
+        }
+
         ZipEntry aEntry;
         sal_Int16 nCommentLen;
         ::std::vector<std::pair<sal_uInt64, sal_uInt64>> unallocated = { { 0, nCenPos } };
@@ -1437,6 +1468,9 @@ sal_Int64 ZipFile::readCEN()
             // unfortunately readLOC is required now to check the consistency
             assert(aEntry.nOffset <= 0);
             sal_uInt64 const nStart{ o3tl::make_unsigned(-aEntry.nOffset) };
+            // a memory stream refuses to seek past its end; fail as reading past EOF of a file does
+            if (nStart > nBufferedLen)
+                throw uno::RuntimeException();
             sal_uInt64 const nEnd = readLOC_Impl(aEntry, aTempNameBuffer, aTempExtraBuffer);
             assert(nStart < nEnd);
             for (auto it = unallocated.begin(); ; ++it)

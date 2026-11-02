@@ -104,6 +104,7 @@ class ConfigurationAccess_UICommand : // Order is necessary for right initializa
         {
             CmdToInfoMap() : bPopup( false ),
                              bCommandNameCreated( false ),
+                             bDetailsLoaded( false ),
                              bIsExperimental( false ),
                              nProperties( 0 ) {}
 
@@ -114,7 +115,8 @@ class ConfigurationAccess_UICommand : // Order is necessary for right initializa
             OUString            aTooltipLabel;
             OUString            aTargetURL;
             bool                bPopup : 1,
-                                bCommandNameCreated : 1;
+                                bCommandNameCreated : 1,
+                                bDetailsLoaded : 1; ///< labels etc. are read on first use
             bool                bIsExperimental;
             sal_Int32           nProperties;
         };
@@ -122,6 +124,7 @@ class ConfigurationAccess_UICommand : // Order is necessary for right initializa
         Any                       getSequenceFromCache( const OUString& aCommandURL );
         Any                       getInfoFromCommand( const OUString& rCommandURL );
         static void               fillInfoFromResult( CmdToInfoMap& rCmdInfo, const OUString& aLabel );
+        void                      loadCommandDetails( const OUString& rCommandURL, CmdToInfoMap& rCmdInfo );
         Sequence< OUString > getAllCommands();
         void                  fillCache();
         void                  addGenericInfoToCache();
@@ -260,11 +263,43 @@ void ConfigurationAccess_UICommand::fillInfoFromResult( CmdToInfoMap& rCmdInfo, 
     rCmdInfo.bCommandNameCreated = true;
 }
 
+void ConfigurationAccess_UICommand::loadCommandDetails( const OUString& rCommandURL, CmdToInfoMap& rCmdInfo )
+{
+    rCmdInfo.bDetailsLoaded = true;
+
+    const Reference< XNameAccess >& xConfigAccess = rCmdInfo.bPopup ? m_xConfigAccessPopups : m_xConfigAccess;
+    if ( !xConfigAccess.is() )
+        return;
+
+    try
+    {
+        Reference< XNameAccess > xNameAccess( xConfigAccess->getByName( rCommandURL ), UNO_QUERY );
+        if ( xNameAccess.is() )
+        {
+            xNameAccess->getByName( u"Label"_ustr )           >>= rCmdInfo.aLabel;
+            xNameAccess->getByName( u"ContextLabel"_ustr )    >>= rCmdInfo.aContextLabel;
+            xNameAccess->getByName( u"PopupLabel"_ustr )      >>= rCmdInfo.aPopupLabel;
+            xNameAccess->getByName( u"TooltipLabel"_ustr )    >>= rCmdInfo.aTooltipLabel;
+            xNameAccess->getByName( u"TargetURL"_ustr )       >>= rCmdInfo.aTargetURL;
+            xNameAccess->getByName( u"IsExperimental"_ustr )  >>= rCmdInfo.bIsExperimental;
+        }
+    }
+    catch (const css::lang::WrappedTargetException&)
+    {
+    }
+    catch (const css::container::NoSuchElementException&)
+    {
+    }
+}
+
 Any ConfigurationAccess_UICommand::getSequenceFromCache( const OUString& aCommandURL )
 {
     CommandToInfoCache::iterator pIter = m_aCmdInfoCache.find( aCommandURL );
     if ( pIter != m_aCmdInfoCache.end() )
     {
+        if ( !pIter->second.bDetailsLoaded )
+            loadCommandDetails( aCommandURL, pIter->second );
+
         if ( !pIter->second.bCommandNameCreated )
             fillInfoFromResult( pIter->second, pIter->second.aLabel );
 
@@ -312,12 +347,8 @@ void ConfigurationAccess_UICommand::impl_fill(const Reference< XNameAccess >& _x
                 CmdToInfoMap aCmdToInfo;
 
                 aCmdToInfo.bPopup = _bPopup;
-                xNameAccess->getByName( u"Label"_ustr )           >>= aCmdToInfo.aLabel;
-                xNameAccess->getByName( u"ContextLabel"_ustr )    >>= aCmdToInfo.aContextLabel;
-                xNameAccess->getByName( u"PopupLabel"_ustr )      >>= aCmdToInfo.aPopupLabel;
-                xNameAccess->getByName( u"TooltipLabel"_ustr )    >>= aCmdToInfo.aTooltipLabel;
-                xNameAccess->getByName( u"TargetURL"_ustr )       >>= aCmdToInfo.aTargetURL;
-                xNameAccess->getByName( u"IsExperimental"_ustr )  >>= aCmdToInfo.bIsExperimental;
+                // Only what the image lists need; the rest of the thousands of commands' data is
+                // read in loadCommandDetails when a command is actually looked up.
                 xNameAccess->getByName( m_aPropProperties ) >>= aCmdToInfo.nProperties;
 
                 m_aCmdInfoCache.emplace( aNameSeq[i], aCmdToInfo );

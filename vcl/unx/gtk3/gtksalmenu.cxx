@@ -336,7 +336,12 @@ void GtkSalMenu::ImplUpdate(bool bRecurse, bool bRemoveDisabledEntries)
                 SAL_INFO("vcl.unity", "preparing submenu  " << pSubMenuModel << " to menu model " << G_MENU_MODEL(pSubMenuModel) << " and action group " << G_ACTION_GROUP(pActionGroup));
                 pSubmenu->SetMenuModel( G_MENU_MODEL( pSubMenuModel ) );
                 pSubmenu->SetActionGroup( G_ACTION_GROUP( pActionGroup ) );
-                pSubmenu->ImplUpdate(true, bRemoveDisabledEntries);
+                // In a menubar in the window the contents of a menu only get filled when
+                // it opens, see GtkSalMenu::Activate. Creating hundreds of items which may
+                // never be seen is the largest part of creating a window. A global menu may
+                // be read without any activation, so that needs everything up front.
+                if (bRecurse || bUnityMode || !mbMenuBar)
+                    pSubmenu->ImplUpdate(true, bRemoveDisabledEntries);
             }
 
             g_object_unref( pSubMenuModel );
@@ -1046,7 +1051,27 @@ void GtkSalMenu::SetFrame(const SalFrame* pFrame)
 
     // Generate the main menu structure.
     if ( PrepUpdate() )
-        UpdateFull();
+    {
+        if (bUnityMode)
+        {
+            // A global menu may be queried without any activation callback.
+            UpdateFull();
+        }
+        else if (!mbInActivateCallback)
+        {
+            // Activating every submenu here creates all popup controllers and
+            // queries all dispatches (possibly starting a JVM) before the window
+            // is even shown, and is a large part of startup time. Each submenu is
+            // activated in GtkSalMenu::Activate when it opens, so here only
+            // activate the menubar itself (tdf#138425) and sync the structure.
+            Menu* pMenuBar = mpVCLMenu.get();
+            mbInActivateCallback = true;
+            pMenuBar->HandleMenuActivateEvent(pMenuBar);
+            mbInActivateCallback = false;
+            Update();
+            pMenuBar->HandleMenuDeActivateEvent(pMenuBar);
+        }
+    }
 
     g_lo_menu_insert_section( pMenuModel, 0, nullptr, mpMenuModel );
 

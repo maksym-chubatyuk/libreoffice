@@ -1351,20 +1351,33 @@ namespace
         PREFER_LIGHT
     };
 
-    void ReadColorScheme(GDBusProxy* proxy, GVariant** out)
+    /// The last color scheme read from the settings portal, if any.
+    GVariant* gPortalColorScheme = nullptr;
+
+    void SetPortalColorScheme(GVariant* pScheme)
     {
-        g_autoptr (GVariant) ret =
-            g_dbus_proxy_call_sync(proxy, "Read",
-                                   g_variant_new ("(ss)", "org.freedesktop.appearance", "color-scheme"),
-                                   G_DBUS_CALL_FLAGS_NONE, G_MAXINT, nullptr, nullptr);
+        if (gPortalColorScheme)
+            g_variant_unref(gPortalColorScheme);
+        gPortalColorScheme = pScheme ? g_variant_ref(pScheme) : nullptr;
+    }
+
+    // Never wait for the portal: it can take a long time to get activated, and a window
+    // doesn't need to wait for that. It gets to use the scheme once it is known.
+    void ColorSchemeRead(GObject* pSource, GAsyncResult* pResult, gpointer)
+    {
+        g_autoptr (GVariant) ret = g_dbus_proxy_call_finish(G_DBUS_PROXY(pSource), pResult, nullptr);
         if (!ret)
             return;
 
         g_autoptr (GVariant) child = nullptr;
+        g_autoptr (GVariant) value = nullptr;
         g_variant_get(ret, "(v)", &child);
-        g_variant_get(child, "v", out);
+        g_variant_get(child, "v", &value);
 
-        return;
+        SolarMutexGuard aGuard;
+        SetPortalColorScheme(value);
+        for (SalFrame* pFrame : GetGtkSalData()->GetGtkDisplay()->getFrames())
+            static_cast<GtkSalFrame*>(pFrame)->SetColorScheme(gPortalColorScheme);
     }
 }
 
@@ -1400,7 +1413,12 @@ void GtkSalFrame::SetColorScheme(GVariant* variant)
 
     bool bDarkIconTheme(color_scheme == PREFER_DARK);
     GtkSettings* pSettings = gtk_widget_get_settings(m_pWindow);
-    g_object_set(pSettings, "gtk-application-prefer-dark-theme", bDarkIconTheme, nullptr);
+    // Setting this reloads the theme's CSS even if the value stays the same, and this runs for
+    // each new frame.
+    gboolean bCurrentDark = false;
+    g_object_get(pSettings, "gtk-application-prefer-dark-theme", &bCurrentDark, nullptr);
+    if (bool(bCurrentDark) != bDarkIconTheme)
+        g_object_set(pSettings, "gtk-application-prefer-dark-theme", bDarkIconTheme, nullptr);
 }
 
 bool GtkSalFrame::GetUseDarkMode() const
@@ -1438,6 +1456,7 @@ static void settings_portal_changed_cb(GDBusProxy*, const char*, const char* sig
         g_strcmp0(name, "color-scheme"))
       return;
 
+    SetPortalColorScheme(value);
     GtkSalFrame* pThis = static_cast<GtkSalFrame*>(frame);
     pThis->SetColorScheme(value);
 }
@@ -1449,14 +1468,23 @@ void GtkSalFrame::ListenPortalSettings()
     if (!pSessionBus)
         return;
 
-    m_pSettingsPortal = g_dbus_proxy_new_sync(pSessionBus,
-                                              G_DBUS_PROXY_FLAGS_NONE,
-                                              nullptr,
-                                              "org.freedesktop.portal.Desktop",
-                                              "/org/freedesktop/portal/desktop",
-                                              "org.freedesktop.portal.Settings",
-                                              nullptr,
-                                              nullptr);
+    // One proxy for all frames, and one read of the setting: each new frame would otherwise add
+    // blocking D-Bus calls to opening it. The session bus stays around for the whole process.
+    static GDBusProxy* const pSharedPortal = []()
+    {
+        GDBusProxy* pProxy = g_dbus_proxy_new_sync(
+            pSessionBus,
+            GDBusProxyFlags(G_DBUS_PROXY_FLAGS_DO_NOT_LOAD_PROPERTIES
+                            | G_DBUS_PROXY_FLAGS_DO_NOT_AUTO_START_AT_CONSTRUCTION),
+            nullptr, "org.freedesktop.portal.Desktop", "/org/freedesktop/portal/desktop",
+            "org.freedesktop.portal.Settings", nullptr, nullptr);
+        if (pProxy)
+            g_dbus_proxy_call(pProxy, "Read",
+                              g_variant_new("(ss)", "org.freedesktop.appearance", "color-scheme"),
+                              G_DBUS_CALL_FLAGS_NONE, -1, nullptr, ColorSchemeRead, nullptr);
+        return pProxy;
+    }();
+    m_pSettingsPortal = pSharedPortal ? G_DBUS_PROXY(g_object_ref(pSharedPortal)) : nullptr;
 
     UpdateDarkMode();
 
@@ -1607,10 +1635,7 @@ void GtkSalFrame::ListenSessionManager()
 
 void GtkSalFrame::UpdateDarkMode()
 {
-    g_autoptr (GVariant) value = nullptr;
-    if (m_pSettingsPortal)
-        ReadColorScheme(m_pSettingsPortal, &value);
-    SetColorScheme(value);
+    SetColorScheme(gPortalColorScheme);
 }
 
 #if GTK_CHECK_VERSION(4,0,0)
