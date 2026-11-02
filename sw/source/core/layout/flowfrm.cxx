@@ -826,55 +826,37 @@ SwSectionFrame* SwSectionFrame::FindMaster() const
     if (!m_pSection)
         return nullptr;
 
-    SwIterator<SwSectionFrame,SwFormat> aIter( *m_pSection->GetFormat() );
-    SwSectionFrame* pSect = aIter.First();
-    while ( pSect )
+    const SwFlowFrame* pPrec = SwFlowFrame::GetPrecede();
+    if ( !pPrec )
     {
-        if (pSect->GetFollow() == this)
-            return pSect;
-        pSect = aIter.Next();
+        OSL_FAIL( "Follow is lost in Space." );
+        return nullptr;
     }
 
-    OSL_FAIL( "Follow is lost in Space." );
-    return nullptr;
+    return const_cast<SwSectionFrame*>(static_cast<const SwSectionFrame*>(pPrec));
 }
 
 SwTabFrame* SwTabFrame::FindMaster( bool bFirstMaster ) const
 {
     OSL_ENSURE( IsFollow(), "SwTabFrame::FindMaster(): !IsFollow" );
 
-    SwIterator<SwTabFrame,SwFormat> aIter( *GetTable()->GetFrameFormat() );
-    SwTabFrame* pTab = aIter.First();
-    while ( pTab )
+    const SwFlowFrame* pPrec = SwFlowFrame::GetPrecede();
+    if ( !pPrec )
     {
-            if ( bFirstMaster )
-            {
-                // Optimization. This makes code like this obsolete:
-                // while ( pTab->IsFollow() )
-                //     pTab = pTab->FindMaster();
-
-                if ( !pTab->IsFollow() )
-                {
-                    SwTabFrame* pNxt = pTab;
-                    while ( pNxt )
-                    {
-                        if ( pNxt->GetFollow() == this )
-                            return pTab;
-                        pNxt = pNxt->GetFollow();
-                    }
-                }
-            }
-            else
-            {
-                if ( pTab->GetFollow() == this )
-                    return pTab;
-            }
-
-            pTab = aIter.Next();
+        OSL_FAIL( "Follow is lost in Space." );
+        return nullptr;
     }
 
-    OSL_FAIL( "Follow is lost in Space." );
-    return nullptr;
+    if ( bFirstMaster )
+    {
+        // Optimization. This makes code like this obsolete:
+        // while ( pTab->IsFollow() )
+        //     pTab = pTab->FindMaster();
+        while ( pPrec->GetPrecede() )
+            pPrec = pPrec->GetPrecede();
+    }
+
+    return const_cast<SwTabFrame*>(static_cast<const SwTabFrame*>(pPrec));
 }
 
 /**

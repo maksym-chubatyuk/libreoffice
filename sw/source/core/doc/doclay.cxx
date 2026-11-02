@@ -1355,6 +1355,35 @@ static UIName lcl_GetUniqueFlyName(const SwDoc& rDoc, TranslateId pDefStrId, sal
     UIName aName(SwResId(pDefStrId));
     sal_Int32 nNmLen = aName.toString().getLength();
 
+    // Scanning all formats for each new name makes import quadratic in the number of flys.
+    // Search the name index for a free number that follows a used one instead: that is the
+    // lowest free number if the used numbers are contiguous, and always gives a unique name.
+    if (eType == sal_uInt16(RES_FLYFRMFMT) && (rDoc.IsInReading() || rDoc.IsInWriterfilterImport()))
+    {
+        const auto& rFormats = *rDoc.GetSpzFrameFormats();
+        auto const isUsed = [&rFormats, &aName, eType](sal_Int32 const nNum)
+        {
+            UIName const aTmp(aName.toString() + OUString::number(nNum));
+            return rFormats.findByTypeAndName(eType, aTmp) != rFormats.typeAndNameEnd();
+        };
+        sal_Int32 nUsed = 0;
+        sal_Int32 nFree = 1;
+        while (isUsed(nFree))
+        {
+            nUsed = nFree;
+            nFree *= 2;
+        }
+        while (nFree - nUsed > 1)
+        {
+            sal_Int32 const nMiddle = nUsed + (nFree - nUsed) / 2;
+            if (isUsed(nMiddle))
+                nUsed = nMiddle;
+            else
+                nFree = nMiddle;
+        }
+        return UIName(aName.toString() + OUString::number(nFree));
+    }
+
     std::vector<unsigned int> aUsedNums;
     aUsedNums.reserve(rDoc.GetSpzFrameFormats()->size());
 

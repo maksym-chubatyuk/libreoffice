@@ -154,6 +154,8 @@ private:
     rtl::Reference<SwXTextDefaults>         m_xTextDefaults;
     std::vector< StyleSheetEntryPtr >       m_aStyleSheetEntries;
     std::unordered_map< OUString, StyleSheetEntryPtr > m_aStyleSheetEntriesMap;
+    /// first entry of m_aStyleSheetEntries for each converted style name
+    std::unordered_map< OUString, StyleSheetEntryPtr > m_aConvertedStyleNameMap;
     std::map<OUString, OUString>            m_ClonedTOCStylesMap;
     StyleSheetEntryPtr                      m_pCurrentEntry;
     PropertyMapPtr                          m_pDefaultParaProps, m_pDefaultCharProps;

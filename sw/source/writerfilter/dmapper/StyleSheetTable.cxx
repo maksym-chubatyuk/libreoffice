@@ -776,6 +776,7 @@ void StyleSheetTable::lcl_entry(const writerfilter::Reference<Properties>::Point
         m_pCurrentEntry->m_sConvertedStyleName = ConvertStyleName(m_pCurrentEntry->m_sStyleName).first;
         m_aStyleSheetEntries.push_back( m_pCurrentEntry );
         m_aStyleSheetEntriesMap.emplace( m_pCurrentEntry->m_sStyleIdentifierD, m_pCurrentEntry );
+        m_aConvertedStyleNameMap.emplace( m_pCurrentEntry->m_sConvertedStyleName, m_pCurrentEntry );
     }
     else
     {
@@ -1054,6 +1055,7 @@ OUString StyleSheetTable::CloneTOCStyle(FontTablePtr const& rFontTable, StyleShe
     pClone->m_sStyleName = rNewName;
     pClone->m_sConvertedStyleName = ConvertStyleName(rNewName).first;
     m_aStyleSheetEntries.push_back(pClone);
+    m_aConvertedStyleNameMap.emplace(pClone->m_sConvertedStyleName, pClone);
     // the old converted name is what is applied to paragraphs
     m_ClonedTOCStylesMap.emplace(pStyle->m_sConvertedStyleName, pClone->m_sConvertedStyleName);
     std::vector<StyleSheetEntryPtr> const styles{ pClone };
@@ -1576,16 +1578,10 @@ StyleSheetEntryPtr StyleSheetTable::FindStyleSheetByISTD(const OUString& sIndex)
 
 StyleSheetEntryPtr StyleSheetTable::FindStyleSheetByConvertedStyleName(std::u16string_view sIndex)
 {
-    StyleSheetEntryPtr pRet;
-    for(const StyleSheetEntryPtr & rpEntry : m_aStyleSheetEntries)
-    {
-        if( rpEntry->m_sConvertedStyleName == sIndex)
-        {
-            pRet = rpEntry;
-            break;
-        }
-    }
-    return pRet;
+    auto const findIt = m_aConvertedStyleNameMap.find(OUString(sIndex));
+    if (findIt != m_aConvertedStyleNameMap.end())
+        return findIt->second;
+    return StyleSheetEntryPtr();
 }
 
 

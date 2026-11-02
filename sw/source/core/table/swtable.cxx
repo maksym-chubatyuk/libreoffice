@@ -34,6 +34,7 @@
 #include <fmtfld.hxx>
 #include <frmatr.hxx>
 #include <doc.hxx>
+#include <IDocumentLayoutAccess.hxx>
 #include <IDocumentLinksAdministration.hxx>
 #include <IDocumentRedlineAccess.hxx>
 #include <IDocumentFieldsAccess.hxx>
@@ -1493,10 +1494,15 @@ SwTableLineFormat* SwTableLine::ClaimFrameFormat()
             *pNewFormat = *pRet;
 
             // register SwRowFrames that know me as clients at the new Format
-            SwIterator<SwRowFrame,SwFormat> aFrameIter( *pRet );
-            for( SwRowFrame* pFrame = aFrameIter.First(); pFrame; pFrame = aFrameIter.Next() )
-                if( pFrame->GetTabLine() == this )
-                    pFrame->RegisterToFormat( *pNewFormat );
+            // Without a layout there are no frames, and walking all the clients of
+            // the shared format for each line would be quadratic during import.
+            if (pRet->GetDoc().getIDocumentLayoutAccess().HasLayout())
+            {
+                SwIterator<SwRowFrame,SwFormat> aFrameIter( *pRet );
+                for( SwRowFrame* pFrame = aFrameIter.First(); pFrame; pFrame = aFrameIter.Next() )
+                    if( pFrame->GetTabLine() == this )
+                        pFrame->RegisterToFormat( *pNewFormat );
+            }
 
             // register myself
             pNewFormat->Add(*this);
@@ -2153,10 +2159,15 @@ SwTableBoxFormat* SwTableBox::ClaimFrameFormat()
             pNewFormat->UnlockModify();
 
             // re-register SwCellFrame objects that know me
-            SwIterator<SwCellFrame,SwFormat> aFrameIter( *pRet );
-            for( SwCellFrame* pCell = aFrameIter.First(); pCell; pCell = aFrameIter.Next() )
-                if (&pCell->GetTabBox() == this)
-                    pCell->RegisterToFormat( *pNewFormat );
+            // Without a layout there are no frames, and walking all the clients of
+            // the shared format for each box would be quadratic during import.
+            if (pRet->GetDoc().getIDocumentLayoutAccess().HasLayout())
+            {
+                SwIterator<SwCellFrame,SwFormat> aFrameIter( *pRet );
+                for( SwCellFrame* pCell = aFrameIter.First(); pCell; pCell = aFrameIter.Next() )
+                    if (&pCell->GetTabBox() == this)
+                        pCell->RegisterToFormat( *pNewFormat );
+            }
 
             // re-register myself
             pNewFormat->Add(*this);

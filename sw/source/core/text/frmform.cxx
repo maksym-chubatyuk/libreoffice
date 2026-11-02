@@ -2458,9 +2458,16 @@ void SwTextFrame::Format( vcl::RenderContext* pRenderContext, const SwBorderAttr
             {
                 ::std::vector<SwAnchoredObject *> intersectingObjs;
                 ::std::vector<SwFrame const*> nexts;
-                for (SwFrame const* pNext = GetNext(); pNext; pNext = pNext->GetNext())
+                // Only read if FormatImpl() finds intersecting objects, which needs
+                // anchored objects on this page. Avoid this walk otherwise: it is
+                // O(following frames) per Format(), so quadratic during layout.
+                SwPageFrame const*const pCurrentPage(FindPageFrame());
+                if (pCurrentPage && pCurrentPage->GetSortedObjs())
                 {
-                    nexts.push_back(pNext);
+                    for (SwFrame const* pNext = GetNext(); pNext; pNext = pNext->GetNext())
+                    {
+                        nexts.push_back(pNext);
+                    }
                 }
                 FormatImpl(pRenderContext, EnsurePara(), intersectingObjs);
                 if( pFootnoteBoss && nFootnoteHeight )

@@ -2180,6 +2180,22 @@ bool SwTextNode::CountWords( SwDocStat& rStat,
     {   // not counting hidden paras
         return false;
     }
+
+    // Shortcut when counting a whole non-empty paragraph and current count is clean: this avoids
+    // generating the numbering string, which only matters to the count if it needs an update.
+    if ( bCountAll && nStt != nEnd && !IsWordCountDirty() )
+    {
+        // count of non-empty paras
+        ++rStat.nPara;
+
+        // accumulate into DocStat record to return the values
+        rStat.nWord += m_aParagraphIdleData.nNumberOfWords;
+        rStat.nAsianWord += m_aParagraphIdleData.nNumberOfAsianWords;
+        rStat.nChar += m_aParagraphIdleData.nNumberOfChars;
+        rStat.nCharExcludingSpaces += m_aParagraphIdleData.nNumberOfCharsExcludingSpaces;
+        return false;
+    }
+
     // count words in numbering string if started at beginning of para:
     bool bCountNumbering = nStt == 0;
     bool bHasBullet = false, bHasNumbering = false;

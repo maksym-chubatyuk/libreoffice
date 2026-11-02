@@ -69,6 +69,7 @@
 #include <docsh.hxx>
 
 #include <memory>
+#include <unordered_map>
 
 #ifdef DBG_UTIL
 #define CHECK_TABLE(t) (t).CheckConsistency();
@@ -124,6 +125,8 @@ class SaveTable
     const SwTable* m_pSwTable;
     SfxItemSets m_aSets;
     SwFrameFormatsV m_aFrameFormats;
+    /// position in m_aFrameFormats of each format; only used while saving the table in the ctor
+    std::unordered_map<SwFrameFormat*, size_t> m_aFormatPositions;
     sal_uInt16 m_nLineCount;
     bool m_bModifyBox : 1;
     bool m_bSaveFormula : 1;
@@ -906,13 +909,15 @@ SaveTable::SaveTable( const SwTable& rTable, sal_uInt16 nLnCnt, bool bSaveFormul
         pLn = new SaveLine( pLn, *rTable.GetTabLines()[ n ], *this );
 
     m_aFrameFormats.clear();
+    std::unordered_map<SwFrameFormat*, size_t>().swap(m_aFormatPositions); // free the memory
     m_pSwTable = nullptr;
 }
 
 sal_uInt16 SaveTable::AddFormat( SwFrameFormat* pFormat, bool bIsLine )
 {
-    size_t nRet = m_aFrameFormats.GetPos(pFormat);
-    if( SIZE_MAX == nRet )
+    auto const [itPos, bNew] = m_aFormatPositions.try_emplace(pFormat, m_aSets.size());
+    size_t nRet = itPos->second;
+    if( bNew )
     {
         // Create copy of ItemSet
         auto pSet = std::make_shared<SfxItemSet>( *pFormat->GetAttrSet().GetPool(),
