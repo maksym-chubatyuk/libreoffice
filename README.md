@@ -1,4 +1,54 @@
 # LibreOffice
+
+> **This is an unofficial fork of [LibreOffice](https://www.libreoffice.org/)**,
+> not affiliated with or endorsed by The Document Foundation. It changes the
+> code to start faster, handle large documents faster, and use less battery on
+> Linux laptops. It is built without Java. Please report problems with it here,
+> not to the LibreOffice project.
+
+## About this fork
+
+All measurements compare this fork, built with Clang, against the Arch Linux
+package of LibreOffice 26.8.1, built with GCC, on one laptop with the same
+fonts. Part of each difference may come from the compiler and from Java being
+removed, not only from the code changes.
+
+| Task | LibreOffice 26.8.1 | This fork |
+| --- | --- | --- |
+| Open Writer on Wayland | 1.27 s | 0.76 s |
+| Open Calc on Wayland | 1.07 s | 0.72 s |
+| Memory for an empty Writer window | 407 MB | 297 MB |
+| Lay out a 3,400-page document in the background | 28 s | 15 s |
+| Export that document to PDF | 42.9 s | 31.4 s |
+| Load a DOCX with a large table | 24.8 s | 5.7 s |
+| Load a PPTX with a large table | 65.6 s | 5.5 s |
+| Calc: `MATCH`-heavy workbook | 43.7 s | 0.77 s |
+| Calc: `COUNTIF`-heavy workbook | 14.2 s | 0.85 s |
+
+To save battery, the text cursor stops blinking after 10 seconds without input
+and the spell check timer no longer repeats forever. When running on battery,
+Writer also pauses background layout for pages far below the visible area, so
+**page and word counts can be partial until you scroll there**.
+
+Without Java, the HSQLDB database engine in Base, the report builder, and
+extensions that need Java do not work.
+
+Build it with the settings this fork uses:
+
+    ./autogen.sh --with-distro=LibreOfficeLinuxLean
+    make
+
+Spell checking uses system dictionaries, such as Arch's `hunspell-en_us`.
+
+To follow upstream, merge from `https://git.libreoffice.org/core`. Its
+`dictionaries`, `helpcontent2` and `translations` submodules are not part of
+this fork; their relative URLs need to point at LibreOffice's repositories if
+you build with them.
+
+The rest of this file is the original LibreOffice README.
+
+---
+
 [![Coverity Scan Build Status](https://scan.coverity.com/projects/211/badge.svg)](https://scan.coverity.com/projects/211) [![OpenSSF Best Practices](https://www.bestpractices.dev/projects/307/badge)](https://www.bestpractices.dev/projects/307) [![Translation status](https://weblate.documentfoundation.org/widgets/libo_ui-master/-/svg-badge.svg)](https://weblate.documentfoundation.org/engage/libo_ui-master/?utm_source=widget)
 
 <img align="right" width="150" src="https://opensource.org/wp-content/uploads/2009/06/OSIApproved.svg">
