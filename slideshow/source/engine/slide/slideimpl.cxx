@@ -407,15 +407,30 @@ void SlideImpl::prefetch()
     // Try to prefetch all graphics from the page. This will be done
     // in threads to be more efficient than loading them on-demand one by one.
     std::vector<Graphic*> graphics;
-    for (sal_Int32 i = 0; i < mxDrawPage->getCount(); i++)
+    const auto collectGraphics = [&graphics](const uno::Reference<drawing::XDrawPage>& xPage)
     {
-        css::uno::Reference<css::drawing::XShape> xShape(mxDrawPage->getByIndex(i), css::uno::UNO_QUERY_THROW);
-        SdrObject* pObj = SdrObject::getSdrObjectFromXShape(xShape);
-        if (!pObj)
-            continue;
-        if( SdrGrafObj* grafObj = dynamic_cast<SdrGrafObj*>(pObj))
-            if( !grafObj->GetGraphic().isAvailable())
-                graphics.push_back( const_cast<Graphic*>(&grafObj->GetGraphic()));
+        for (sal_Int32 i = 0; i < xPage->getCount(); i++)
+        {
+            css::uno::Reference<css::drawing::XShape> xShape(xPage->getByIndex(i), css::uno::UNO_QUERY_THROW);
+            SdrObject* pObj = SdrObject::getSdrObjectFromXShape(xShape);
+            if (!pObj)
+                continue;
+            if( SdrGrafObj* grafObj = dynamic_cast<SdrGrafObj*>(pObj))
+                if( !grafObj->GetGraphic().isAvailable())
+                    graphics.push_back( const_cast<Graphic*>(&grafObj->GetGraphic()));
+            if( const Graphic* fillGraphic = pObj->getFillGraphic())
+                if( !fillGraphic->isAvailable())
+                    graphics.push_back( const_cast<Graphic*>(fillGraphic));
+        }
+    };
+    collectGraphics(mxDrawPage);
+    // The master page's shapes are painted with the slide, too.
+    uno::Reference<drawing::XMasterPageTarget> xMasterPageTarget(mxDrawPage, uno::UNO_QUERY);
+    if (xMasterPageTarget.is())
+    {
+        uno::Reference<drawing::XDrawPage> xMasterPage(xMasterPageTarget->getMasterPage());
+        if (xMasterPage.is())
+            collectGraphics(xMasterPage);
     }
     if(graphics.size() > 1) // threading does not help with loading just one
         GraphicFilter::GetGraphicFilter().MakeGraphicsAvailableThreaded( graphics );

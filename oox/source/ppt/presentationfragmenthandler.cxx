@@ -19,6 +19,8 @@
 
 #include <sal/config.h>
 
+#include <string_view>
+#include <unordered_map>
 #include <unordered_set>
 
 #include <comphelper/anytostring.hxx>
@@ -201,6 +203,24 @@ PresentationFragmentHandler::~PresentationFragmentHandler() noexcept
 
 void PresentationFragmentHandler::importSlideNames(const XmlFilterBase& rFilter, const std::vector<SlidePersistPtr>& rSlidePersist)
 {
+    // How many of the pages seen so far a title clashes with: a page named "name" counts for the
+    // title "name", and when its name also has the form "title (number)", for that title too.
+    std::unordered_map<OUString, sal_Int32> aTitleUseCounts;
+    sal_Int32 nCountedPages = 0;
+    const auto lcl_countPageName = [&aTitleUseCounts](const OUString& rName)
+    {
+        ++aTitleUseCounts[rName];
+        if (!rName.endsWith(")"))
+            return;
+        const std::u16string_view aName(rName);
+        for (size_t nPos = aName.find(u" ("); nPos != std::u16string_view::npos;
+             nPos = aName.find(u" (", nPos + 1))
+        {
+            if (o3tl::toInt32(aName.substr(nPos + 2, aName.size() - nPos - 3)) > 0)
+                ++aTitleUseCounts[OUString(aName.substr(0, nPos))];
+        }
+    };
+
     sal_Int32 nMaxPages = rSlidePersist.size();
     for (sal_Int32 nPage = 0; nPage < nMaxPages; nPage++)
     {
@@ -214,20 +234,18 @@ void PresentationFragmentHandler::importSlideNames(const XmlFilterBase& rFilter,
             // check duplicated title name
             if (bUseTitleAsSlideName)
             {
-                sal_Int32 nCount = 1;
                 Reference<XDrawPagesSupplier> xDPS(rFilter.getModel(), UNO_QUERY_THROW);
                 Reference<XDrawPages> xDrawPages(xDPS->getDrawPages(), UNO_SET_THROW);
-                for (sal_Int32 i = 0; i < nPage; ++i)
+                // Pages before this one keep their names from here on, so each is counted once.
+                for (; nCountedPages < nPage; ++nCountedPages)
                 {
-                    Reference<XDrawPage> xDrawPage(xDrawPages->getByIndex(i), UNO_QUERY);
+                    Reference<XDrawPage> xDrawPage(xDrawPages->getByIndex(nCountedPages), UNO_QUERY);
                     Reference<container::XNamed> xNamed(xDrawPage, UNO_QUERY_THROW);
-                    std::u16string_view sRest;
-                    if (o3tl::starts_with(xNamed->getName(), aTitleText, &sRest)
-                        && (sRest.empty()
-                            || (o3tl::starts_with(sRest, u" (") && o3tl::ends_with(sRest, u")")
-                                && o3tl::toInt32(sRest.substr(2, sRest.size() - 3)) > 0)))
-                        nCount++;
+                    lcl_countPageName(xNamed->getName());
                 }
+                sal_Int32 nCount = 1;
+                if (const auto aIter = aTitleUseCounts.find(aTitleText); aIter != aTitleUseCounts.end())
+                    nCount += aIter->second;
                 Reference<container::XNamed> xName(rSlidePersist[nPage]->getPage(), UNO_QUERY_THROW);
                 xName->setName(
                     aTitleText

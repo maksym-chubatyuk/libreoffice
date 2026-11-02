@@ -791,13 +791,23 @@ void SdrTableObjImpl::LayoutTable( tools::Rectangle& rArea, bool bFitWidth, bool
         lastColWidths = getColumnWidths();
         TableModelNotifyGuard aGuard( mxTable.get() );
         mpLayouter->LayoutTable( rArea, bFitWidth, bFitHeight );
+        // TableLayouter::LayoutTable() has updated the border layout as well
+        mbBorderLayoutPending = false;
         lastLayoutResultRectangle = rArea;
         rowSizeChanged = false;
     }
     else
     {
         rArea = lastLayoutResultRectangle;
-        mpLayouter->UpdateBorderLayout();
+        // This path runs for every cell property and text change, and rebuilding the border maps
+        // visits every cell. While the shape is action-locked (e.g. import), do it once at unlock.
+        if (mnUnoLockCount > 0)
+            mbBorderLayoutPending = true;
+        else
+        {
+            mpLayouter->UpdateBorderLayout();
+            mbBorderLayoutPending = false;
+        }
     }
 }
 
@@ -2456,14 +2466,26 @@ void SdrTableObj::SetChanged()
 void SdrTableObj::uno_lock()
 {
     if( mpImpl.is() && mpImpl->mxTable.is() )
+    {
+        ++mpImpl->mnUnoLockCount;
         mpImpl->mxTable->lockBroadcasts();
+    }
 }
 
 
 void SdrTableObj::uno_unlock()
 {
     if( mpImpl.is() && mpImpl->mxTable.is() )
+    {
+        --mpImpl->mnUnoLockCount;
+        // This may deliver a pending notification, whose layout also updates the border layout.
         mpImpl->mxTable->unlockBroadcasts();
+        if( mpImpl->mnUnoLockCount == 0 && mpImpl->mbBorderLayoutPending && mpImpl->mpLayouter )
+        {
+            mpImpl->mpLayouter->UpdateBorderLayout();
+            mpImpl->mbBorderLayoutPending = false;
+        }
+    }
 }
 
 void SdrTableObj::dumpAsXml(xmlTextWriterPtr pWriter) const

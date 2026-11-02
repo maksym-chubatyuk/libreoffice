@@ -64,12 +64,6 @@ sal_Int32 TextRun::insertAt(
         Reference< XTextRange > xStart = xAt;
         PropertySet aPropSet( xStart );
 
-        Reference<XPropertyState> xState(xStart, UNO_QUERY);
-        Any aOldFontName = xState->getPropertyDefault(u"CharFontName"_ustr);
-        Any aOldFontPitch = xState->getPropertyDefault(u"CharFontPitch"_ustr);
-        Any aOldFontFamily = xState->getPropertyDefault(u"CharFontFamily"_ustr);
-        Any aOldFontCharSet = xState->getPropertyDefault(u"CharFontCharSet"_ustr);
-
         TextCharacterProperties aTextCharacterProps( rTextCharacterStyle );
 
         // If no text color specified let's anyway initialize it as default:
@@ -108,11 +102,18 @@ sal_Int32 TextRun::insertAt(
                     sal_Int16 nFontFamily = 0, nFontPitch = 0;
                     bool bSymbolEnc(false);
                     bool bReset = false;
+                    Any aOldFontName, aOldFontPitch, aOldFontFamily, aOldFontCharSet;
 
                     // Direct formatting for symbols.
                     if (bSymbol && aTextCharacterProps.maSymbolFont.getFontData(aFontName, nFontPitch, nFontFamily, &bSymbolEnc, rFilterBase))
 
                     {
+                        Reference<XPropertyState> xState(xStart, UNO_QUERY);
+                        aOldFontName = xState->getPropertyDefault(u"CharFontName"_ustr);
+                        aOldFontPitch = xState->getPropertyDefault(u"CharFontPitch"_ustr);
+                        aOldFontFamily = xState->getPropertyDefault(u"CharFontFamily"_ustr);
+                        aOldFontCharSet = xState->getPropertyDefault(u"CharFontCharSet"_ustr);
+
                         aPropSet.setAnyProperty(PROP_CharFontName, Any(aFontName));
                         aPropSet.setAnyProperty(PROP_CharFontPitch, Any(nFontPitch));
                         aPropSet.setAnyProperty(PROP_CharFontFamily, Any(nFontFamily));

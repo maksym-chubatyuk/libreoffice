@@ -49,6 +49,10 @@ public:
     css::uno::Reference< css::container::XIndexAccess > mxTableStyle;
     std::vector<std::unique_ptr<SdrUndoAction>> maUndos;
     bool mbSkipChangeLayout;
+    /// Number of active SdrTableObj::uno_lock() calls.
+    sal_Int32 mnUnoLockCount = 0;
+    /// The border layout is out of date, because LayoutTable() was called during uno_lock().
+    bool mbBorderLayoutPending = false;
 
     void CropTableModelToSelection(const CellPos& rStart, const CellPos& rEnd);
 
