@@ -73,6 +73,12 @@
 #include <comphelper/lok.hxx>
 #include <drawdoc.hxx>
 
+#include <chrono>
+#include <cstdlib>
+#include <filesystem>
+#include <fstream>
+#include <string>
+
 void SwLayAction::CheckWaitCursor()
 {
     if (IsReschedule())
@@ -571,6 +577,13 @@ void SwLayAction::InternalAction(OutputDevice* pRenderContext)
             ::SetProgressState( nPercentPageNum, m_pImp->GetShell().GetDoc()->GetDocShell());
         }
         m_pOptTab = nullptr;
+
+        if (IsIdle() && m_pRoot->IsIdleLayoutDeferredAt(*pPage))
+        {
+            // Leave the rest of the document for when something needs it.
+            m_bInterrupt = true;
+            continue;
+        }
 
         // No Shortcut for Idle or CalcLayout. The shortcut case means that in case the page is not
         // inside the visible area, then the synchronous (not idle) layout skips the page.
@@ -2398,6 +2411,82 @@ void SwLayIdle::ShowIdle( Color eColor )
 #define SHOW_IDLE( Color )
 #endif // DBG_UTIL
 
+namespace
+{
+/** Whether this runs on battery, checked at most every few seconds. Being plugged in counts as
+    not on battery even if the charge goes down: a laptop can draw more than its charger supplies,
+    and then reports the battery as discharging while it is on AC. */
+bool isRunningOnBattery()
+{
+    static const char* const pOverride = std::getenv("SW_IDLE_LAYOUT_ASSUME_BATTERY");
+    if (pOverride)
+        return *pOverride == '1';
+#if defined(LINUX)
+    static bool bOnBattery = false;
+    static std::chrono::steady_clock::time_point aNextCheck;
+    const auto aNow = std::chrono::steady_clock::now();
+    if (aNow < aNextCheck)
+        return bOnBattery;
+    aNextCheck = aNow + std::chrono::seconds(10);
+
+    bool bHasDischargingBattery = false;
+    bool bHasPower = false;
+    std::error_code aErr;
+    for (const auto& rEntry : std::filesystem::directory_iterator("/sys/class/power_supply", aErr))
+    {
+        std::string aType, aStatus, aScope;
+        int nOnline = 0;
+        std::ifstream(rEntry.path() / "type") >> aType;
+        std::ifstream(rEntry.path() / "scope") >> aScope;
+        if (aScope == "Device")
+            continue; // the battery of a wireless keyboard or mouse
+        if (aType == "Battery")
+        {
+            std::ifstream(rEntry.path() / "status") >> aStatus;
+            bHasDischargingBattery = bHasDischargingBattery || aStatus == "Discharging";
+        }
+        else
+        {
+            std::ifstream(rEntry.path() / "online") >> nOnline;
+            bHasPower = bHasPower || nOnline == 1;
+        }
+    }
+    bOnBattery = bHasDischargingBattery && !bHasPower;
+    return bOnBattery;
+#else
+    return false;
+#endif
+}
+}
+
+bool SwRootFrame::IsIdleLayoutDeferredAt(const SwPageFrame& rPage) const
+{
+    if (comphelper::LibreOfficeKit::isActive() || !isRunningOnBattery())
+        return false;
+    SwViewShell* pShell = GetCurrShell();
+    if (!pShell)
+        return false;
+    // Keep some pages ready below what is visible, so that scrolling stays smooth.
+    const SwTwips nMargin = 10 * rPage.getFrameArea().Height();
+    for (const SwViewShell& rShell : pShell->GetRingContainer())
+    {
+        if (rPage.getFrameArea().Top() <= rShell.VisArea().Bottom() + nMargin)
+            return false;
+    }
+    return true;
+}
+
+bool SwRootFrame::IsIdleLayoutDeferred() const
+{
+    for (const SwFrame* pFrame = Lower(); pFrame; pFrame = pFrame->GetNext())
+    {
+        const SwPageFrame* pPage = static_cast<const SwPageFrame*>(pFrame);
+        if (pPage->IsInvalid() || pPage->IsInvalidFly())
+            return IsIdleLayoutDeferredAt(*pPage);
+    }
+    return false;
+}
+
 SwLayIdle::SwLayIdle( SwRootFrame *pRt, SwViewShellImp *pI ) :
     m_pRoot( pRt ),
     m_pImp( pI )
@@ -2470,6 +2559,10 @@ SwLayIdle::SwLayIdle( SwRootFrame *pRt, SwViewShellImp *pI ) :
 
             bInterrupt = aAction.IsInterrupt();
         }
+
+        // Nothing is left for the visible area, so don't come back until something changes.
+        if (m_pRoot->IsIdleLayoutDeferred())
+            m_pRoot->SetIdleVisibleDone(true);
 
         // Further start/end actions only happen if there were paints started
         // somewhere or if the visibility of the CharRects has changed.

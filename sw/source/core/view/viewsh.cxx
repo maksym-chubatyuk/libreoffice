@@ -1328,6 +1328,13 @@ void SwViewShell::VisPortChgd( const SwRect &rRect)
     if ( rRect == VisArea() )
         return;
 
+    // The newly visible area may need idle jobs which were deferred before.
+    if (SwRootFrame* pRoot = GetLayout(); pRoot && pRoot->IsIdleVisibleDone())
+    {
+        pRoot->SetIdleVisibleDone(false);
+        GetDoc()->getIDocumentTimerAccess().StartIdling();
+    }
+
     // Is someone spuriously rescheduling again?
     SAL_WARN_IF(mbInEndAction, "sw.core", "Scrolling during EndAction");
 

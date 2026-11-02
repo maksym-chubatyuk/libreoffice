@@ -134,7 +134,8 @@ DocumentTimerManager::IdleJob DocumentTimerManager::GetNextIdleJob() const
         {
             for ( auto pLayout : m_rDoc.GetAllLayouts() )
             {
-                if( pLayout->IsIdleFormat() )
+                if (pLayout->IsIdleFormat()
+                    && !(pLayout->IsIdleVisibleDone() && pLayout->IsIdleLayoutDeferred()))
                     return IdleJob::Layout;
             }
         }

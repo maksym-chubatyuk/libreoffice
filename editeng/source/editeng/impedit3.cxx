@@ -189,10 +189,12 @@ void ImpEditEngine::UpdateViews( EditView* pCurView )
 
 IMPL_LINK_NOARG(ImpEditEngine, OnlineSpellHdl, Timer *, void)
 {
-    if ( !Application::AnyInput( VclInputFlags::KEYBOARD ) && IsUpdateLayout() && IsFormatted() )
-        DoOnlineSpelling();
-    else
+    if (Application::AnyInput(VclInputFlags::KEYBOARD))
         maOnlineSpellTimer.Start();
+    else if (IsUpdateLayout() && IsFormatted())
+        DoOnlineSpelling();
+    // Otherwise don't retry: FormatDoc() starts this timer again once there is something to check.
+    // Retrying here wakes up the CPU ten times a second for as long as such a document is open.
 }
 
 IMPL_LINK_NOARG(ImpEditEngine, IdleFormatHdl, Timer *, void)

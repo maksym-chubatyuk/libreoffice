@@ -114,6 +114,7 @@ class SAL_DLLPUBLIC_RTTI SwRootFrame final : public SwLayoutFrame
 
     bool    mbCheckSuperfluous   :1; // Search for empty Pages?
     bool    mbIdleFormat         :1; // Trigger Idle Formatter?
+    bool    mbIdleVisibleDone    :1; // Idle jobs for the visible area are done, the rest is deferred
     bool    mbBrowseWidthValid   :1; // Is mnBrowseWidth valid?
     bool    mbTurboAllowed       :1;
     bool    mbAssertFlyPages     :1; // Insert more Pages for Flys if needed?
@@ -258,6 +259,7 @@ public:
     void SetIdleFlags()
     {
         mbIdleFormat = true;
+        mbIdleVisibleDone = false;
 
         SwViewShell* pCurrShell = GetCurrShell();
         // May be NULL if called from SfxBaseModel::dispose
@@ -267,6 +269,15 @@ public:
     }
     bool IsIdleFormat()  const { return mbIdleFormat; }
     void ResetIdleFormat()     { mbIdleFormat = false; }
+
+    bool IsIdleVisibleDone() const        { return mbIdleVisibleDone; }
+    void SetIdleVisibleDone(bool bDone)   { mbIdleVisibleDone = bDone; }
+    /** While running on battery, idle layout stops some pages below the visible area instead of
+        formatting the whole document: it can be interrupted anyway, so everything that needs
+        the complete layout already asks for it. */
+    bool IsIdleLayoutDeferredAt(const SwPageFrame& rPage) const;
+    /// Whether all the remaining layout work is below the point where idle layout stops.
+    bool IsIdleLayoutDeferred() const;
 
     bool IsNeedGrammarCheck() const         { return mbNeedGrammarCheck; }
     void SetNeedGrammarCheck( bool bVal )

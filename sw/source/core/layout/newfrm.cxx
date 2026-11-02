@@ -408,6 +408,7 @@ SwRootFrame::SwRootFrame( SwFrameFormat *pFormat, SwViewShell * pSh ) :
     mbNeedGrammarCheck( false ),
     mbCheckSuperfluous( false ),
     mbIdleFormat( true ),
+    mbIdleVisibleDone( false ),
     mbBrowseWidthValid( false ),
     mbTurboAllowed( true ),
     mbAssertFlyPages( true ),

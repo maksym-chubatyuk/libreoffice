@@ -40,6 +40,7 @@ struct ImplCursorData
     Degree10        mnOrientation;      // Pixel-Orientation
     CursorDirection mnDirection = CursorDirection::NONE; // indicates writing direction
     sal_uInt16      mnStyle = 0;        // Cursor-Style
+    sal_uInt64      mnBlinkElapsedMs = 0; // How long the cursor has blinked unchanged
     bool            mbCurVisible = false; // Is cursor currently visible
     VclPtr<vcl::Window> mpWindow;           // assigned window
 };
@@ -48,6 +49,11 @@ namespace
 {
 const char* pDisableCursorIndicator(getenv("SAL_DISABLE_CURSOR_INDICATOR"));
 bool bDisableCursorIndicator(nullptr != pDisableCursorIndicator);
+
+// Stop blinking after this long without a change, leaving the cursor shown, as GTK does by default
+// with its gtk-cursor-blink-timeout: each blink wakes up the CPU and repaints, which costs battery
+// for as long as a window just sits there.
+constexpr sal_uInt64 CURSOR_BLINK_STOP_AFTER_MS = 10000;
 
 // Build the cursor shape polygon accounting for direction indicators
 // and orientation, or return empty polygon for simple rectangular cursors
@@ -257,6 +263,7 @@ void vcl::Cursor::ImplDoShow( bool bDrawDirect, bool bRestore )
 
     if ( !mpWindow && (bDrawDirect || !mpData->maTimer.IsActive()) )
     {
+        mpData->mnBlinkElapsedMs = 0;
         mpData->maTimer.SetTimeout( pWindow->GetSettings().GetStyleSettings().GetCursorBlinkTime() );
         if ( mpData->maTimer.GetTimeout() != STYLE_CURSOR_NOBLINKTIME )
             mpData->maTimer.Start();
@@ -398,6 +405,7 @@ void vcl::Cursor::ImplNew()
     ImplDraw();
     if ( !mpWindow )
     {
+        mpData->mnBlinkElapsedMs = 0;
         LOKNotify( mpData->mpWindow, u"cursor_invalidate"_ustr );
         if ( mpData->maTimer.GetTimeout() != STYLE_CURSOR_NOBLINKTIME )
             mpData->maTimer.Start();
@@ -410,6 +418,10 @@ IMPL_LINK_NOARG(vcl::Cursor, ImplTimerHdl, Timer *, void)
         ImplRestore();
     else
         ImplDraw();
+
+    mpData->mnBlinkElapsedMs += mpData->maTimer.GetTimeout();
+    if (mpData->mbCurVisible && mpData->mnBlinkElapsedMs >= CURSOR_BLINK_STOP_AFTER_MS)
+        mpData->maTimer.Stop();
 }
 
 vcl::Cursor::Cursor()
