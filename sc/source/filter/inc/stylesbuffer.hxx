@@ -666,6 +666,9 @@ public:
     /** Returns true, if the XF is a cell XF, and false, if it is a style XF. */
     bool         isCellXf() const { return maModel.mbCellXf; }
 
+    /** Returns a hash value that is the same for XFs comparing equal. */
+    size_t              getModelHash() const;
+
     /** Returns the referred font object. */
     FontRef             getFont() const;
     /** Returns the alignment data of this style. */

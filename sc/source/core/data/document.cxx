@@ -6719,6 +6719,10 @@ void ScDocument::EnableUserInteraction( bool bVal )
 
 bool ScDocument::IsInVBAMode() const
 {
+    // Asking the shell needs the SolarMutex, which the main thread holds during threaded calculation.
+    if (IsThreadedGroupCalcInProgress())
+        return mbVBAModeForThreadedCalc;
+
     if (!mpShell)
         return false;
 

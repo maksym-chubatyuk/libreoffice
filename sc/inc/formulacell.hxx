@@ -521,9 +521,9 @@ public:
      */
     SC_DLLPUBLIC ScFormulaCellGroupRef CreateCellGroup( SCROW nLen, bool bInvariant );
     const ScFormulaCellGroupRef& GetCellGroup() const { return mxGroup;}
-    void SetCellGroup( const ScFormulaCellGroupRef &xRef );
+    SC_DLLPUBLIC void SetCellGroup( const ScFormulaCellGroupRef &xRef );
 
-    CompareState CompareByTokenArray( const ScFormulaCell& rOther ) const;
+    SC_DLLPUBLIC CompareState CompareByTokenArray( const ScFormulaCell& rOther ) const;
 
     bool InterpretFormulaGroup(SCROW nStartOffset = -1, SCROW nEndOffset = -1);
 

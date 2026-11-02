@@ -661,6 +661,9 @@ private:
 
     size_t              mnMutationGuardFlags;
 
+    // Result of IsInVBAMode() for the threaded group calculation in progress.
+    bool mbVBAModeForThreadedCalc = false;
+
     bool mbConnectionXml = false;
     bool mbCustomXml = false;
     OUString aCustomXmlFragmentPath;
@@ -2802,6 +2805,8 @@ public:
 
     SC_DLLPUBLIC ScUndoManager* GetUndoManager();
     bool                         IsInVBAMode() const;
+    /// Remember IsInVBAMode() for threaded calculation, where it can't take the SolarMutex.
+    void                         SnapshotVBAModeForThreadedCalc() { mbVBAModeForThreadedCalc = IsInVBAMode(); }
     ScRowBreakIterator*          GetRowBreakIterator(SCTAB nTab) const;
 
     void                         AddSubTotalCell(ScFormulaCell* pCell);

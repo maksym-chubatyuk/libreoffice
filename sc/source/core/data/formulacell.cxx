@@ -4991,6 +4991,57 @@ struct ScDependantsCalculator
         return false;
     }
 
+    // A three argument SUMIF or AVERAGEIF reads its sum range with the geometry of the criteria
+    // range. If the sum range is at least as large in every row of the group, then that stays
+    // inside the sum range's own reference, which is what the dependency scan looks at.
+    bool IfSumRangeCoversCriteriaRange(sal_Int32 nTokenIdx)
+    {
+        if (nTokenIdx < 3)
+            return false;
+
+        FormulaToken** pRPNArray = mrCode.GetCode();
+
+        // Step over the criterion, which is either one value or something like ">"&A1.
+        sal_Int32 nCriteriaRangeIdx = nTokenIdx - 2;
+        sal_Int32 nNeeded = 1;
+        while (nNeeded > 0)
+        {
+            if (nCriteriaRangeIdx < 0)
+                return false;
+            const OpCode eOp = pRPNArray[nCriteriaRangeIdx]->GetOpCode();
+            if (eOp == ocAmpersand)
+                ++nNeeded;
+            else if (eOp == ocPush)
+                --nNeeded;
+            else
+                return false;
+            --nCriteriaRangeIdx;
+        }
+        if (nCriteriaRangeIdx < 0)
+            return false;
+
+        auto pSumToken = pRPNArray[nTokenIdx - 1];
+        auto pCriteriaToken = pRPNArray[nCriteriaRangeIdx];
+        if (pSumToken->GetOpCode() != ocPush || pSumToken->GetType() != svDoubleRef
+            || pCriteriaToken->GetOpCode() != ocPush || pCriteriaToken->GetType() != svDoubleRef)
+            return false;
+
+        ScComplexRefData aSumRef = static_cast<ScDoubleRefToken*>(pSumToken)->GetDoubleRef();
+        ScComplexRefData aCriteriaRef = static_cast<ScDoubleRefToken*>(pCriteriaToken)->GetDoubleRef();
+
+        // With equal relativeness the size of both ranges is the same in every row of the group.
+        if (aSumRef.Ref1.IsRowRel() != aCriteriaRef.Ref1.IsRowRel()
+            || aSumRef.Ref2.IsRowRel() != aCriteriaRef.Ref2.IsRowRel())
+            return false;
+
+        ScRange aSumRange = aSumRef.toAbs(mrDoc, mrPos);
+        ScRange aCriteriaRange = aCriteriaRef.toAbs(mrDoc, mrPos);
+        return aSumRange.aEnd.Row() - aSumRange.aStart.Row()
+                   >= aCriteriaRange.aEnd.Row() - aCriteriaRange.aStart.Row()
+               && aSumRange.aEnd.Col() - aSumRange.aStart.Col()
+                      >= aCriteriaRange.aEnd.Col() - aCriteriaRange.aStart.Col();
+    }
+
     bool DoIt(ScRangeList* pSuccessfulDependencies, ScAddress* pDirtiedAddress)
     {
         // Partially from ScGroupTokenConverter::convert in sc/source/core/data/grouptokenconverter.cxx
@@ -5034,7 +5085,8 @@ struct ScDependantsCalculator
                 return false;
             }
 
-            if ((p->GetOpCode() == ocSumIf || p->GetOpCode() == ocAverageIf) && p->GetParamCount() >= 3)
+            if ((p->GetOpCode() == ocSumIf || p->GetOpCode() == ocAverageIf) && p->GetParamCount() >= 3
+                && !IfSumRangeCoversCriteriaRange(nTokenIdx))
             {
                 // With a separate sum range these functions grow it to the criteria range's shape
                 // when it is smaller, and read cells beyond the sum range's own reference. Those
@@ -5531,6 +5583,15 @@ bool ScFormulaCell::InterpretFormulaGroupThreading(sc::FormulaLogger::GroupScope
         std::vector<std::unique_ptr<ScInterpreter>> aInterpreters(nThreadCount);
         {
             assert(!rDocument.IsThreadedGroupCalcInProgress());
+
+            // MATCH asks for the VBA mode while searching for a string. Only ask if needed,
+            // as this may create the document's library container.
+            bool bNeedVBAMode = pCode->HasOpCode(ocMatch);
+            for (const auto& rEntry : aFGMap)
+                bNeedVBAMode = bNeedVBAMode || (rEntry.second && rEntry.second->GetCode()->HasOpCode(ocMatch));
+            if (bNeedVBAMode)
+                rDocument.SnapshotVBAModeForThreadedCalc();
+
             rDocument.SetThreadedGroupCalcInProgress(true);
 
             ScMutationDisable aGuard(rDocument, ScMutationGuardFlags::CORE);

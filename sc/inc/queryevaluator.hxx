@@ -19,9 +19,12 @@
 
 #pragma once
 
+#include <cmath>
 #include <memory>
 #include <vector>
 #include <unordered_map>
+
+#include <rtl/math.hxx>
 
 #include "queryentry.hxx"
 
@@ -128,6 +131,20 @@ public:
     OUString getCellString(const ScRefCellValue& rCell, SCROW nRow, SCCOL nCol);
     svl::SharedString getCellSharedString(const ScRefCellValue& rCell, SCROW nRow, SCCOL nCol);
     static bool isMatchWholeCell(const ScDocument& rDoc, ScQueryOp eOp);
+
+    /** If the distance from fValue is larger than this, approxEqual() with fValue is false.
+
+        rtl::math::approxEqual() is out of line and needs log10() for most values that differ.
+        It only accepts differences smaller than 5E-15 times the smaller absolute value, so this
+        much larger limit (about 9E-13 relative) rejects nothing that it would have accepted. */
+    static double approxEqualRejectDistance(double fValue) { return std::fabs(fValue) * 0x1p-40; }
+
+    /** Same result as rtl::math::approxEqual(), but cheap for values that clearly differ. */
+    static bool approxEqualFast(double a, double b)
+    {
+        // Written such that NaN and infinity go to approxEqual() to be sorted out.
+        return !(std::fabs(a - b) > approxEqualRejectDistance(b)) && ::rtl::math::approxEqual(a, b);
+    }
 };
 
 /* vim:set shiftwidth=4 softtabstop=4 expandtab: */

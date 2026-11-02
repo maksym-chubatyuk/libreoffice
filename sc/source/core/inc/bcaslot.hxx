@@ -21,6 +21,7 @@
 
 #include <memory>
 #include <map>
+#include <o3tl/deleter.hxx>
 #include <unordered_set>
 
 #include <svl/broadcast.hxx>
@@ -272,7 +273,7 @@ private:
 
     private:
         SCSIZE                                    mnBcaSlots;
-        std::unique_ptr<ScBroadcastAreaSlot*[]>   ppSlots;
+        std::unique_ptr<ScBroadcastAreaSlot*[], o3tl::free_delete> ppSlots;
 
         TableSlots( const TableSlots& ) = delete;
         TableSlots& operator=( const TableSlots& ) = delete;

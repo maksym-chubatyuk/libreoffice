@@ -1218,7 +1218,6 @@ void ScTokenArray::CheckForThreading( const FormulaToken& r )
         ocOffset,
         ocTableOp,
         ocCell,
-        ocMatch,
         ocInfo,
         ocStyle,
         ocDBAverage,

@@ -21,6 +21,8 @@
 #include <patterncache.hxx>
 
 #include <algorithm>
+#include <unordered_map>
+#include <vector>
 #include <com/sun/star/sheet/XArrayFormulaTokens.hpp>
 #include <com/sun/star/sheet/XSpreadsheetDocument.hpp>
 #include <com/sun/star/util/DateTime.hpp>
@@ -301,35 +303,42 @@ void SheetDataBuffer::setMergedRange( const ScRange& rRange )
 
 typedef std::pair<sal_Int32, sal_Int32> FormatKeyPair;
 
-static void addIfNotInMyMap( const StylesBuffer& rStyles, std::map< FormatKeyPair, ScRangeList >& rMap, sal_Int32 nXfId, sal_Int32 nFormatId, const ScRangeList& rRangeList )
+typedef std::map< FormatKeyPair, ScRangeList > RangeStyleListMap;
+/// Entries of RangeStyleListMap by Xf::getModelHash(), to not compare with each entry.
+typedef std::unordered_map< size_t, std::vector< RangeStyleListMap::iterator > > RangeStyleBuckets;
+
+static void addIfNotInMyMap( const StylesBuffer& rStyles, RangeStyleListMap& rMap, RangeStyleBuckets& rBuckets, sal_Int32 nXfId, sal_Int32 nFormatId, const ScRangeList& rRangeList )
 {
     Xf* pXf1 = rStyles.getCellXf( nXfId ).get();
     if ( !pXf1 )
         return;
 
-    auto it = std::find_if(rMap.begin(), rMap.end(),
-        [&nFormatId, &rStyles, &pXf1](const std::pair<FormatKeyPair, ScRangeList>& rEntry) {
-            if (rEntry.first.second != nFormatId)
+    std::vector< RangeStyleListMap::iterator >& rBucket = rBuckets[ pXf1->getModelHash() ];
+    auto it = std::find_if(rBucket.begin(), rBucket.end(),
+        [&nFormatId, &rStyles, &pXf1](const RangeStyleListMap::iterator& rEntry) {
+            if (rEntry->first.second != nFormatId)
                 return false;
-            Xf* pXf2 = rStyles.getCellXf( rEntry.first.first ).get();
+            Xf* pXf2 = rStyles.getCellXf( rEntry->first.first ).get();
             return *pXf1 == *pXf2;
         });
-    if (it != rMap.end()) // already exists
+    if (it != rBucket.end()) // already exists
     {
         // add ranges from the rangelist to the existing rangelist for the
         // matching style ( should we check if they overlap ? )
-        it->second.insert(it->second.end(), rRangeList.begin(), rRangeList.end());
+        ScRangeList& rExisting = (*it)->second;
+        rExisting.insert(rExisting.end(), rRangeList.begin(), rRangeList.end());
         return;
     }
-    rMap[ FormatKeyPair( nXfId, nFormatId ) ] = rRangeList;
+    rBucket.push_back( rMap.emplace( FormatKeyPair( nXfId, nFormatId ), rRangeList ).first );
 }
 
 void SheetDataBuffer::addColXfStyles()
 {
-    std::map< FormatKeyPair, ScRangeList > rangeStyleListMap;
+    RangeStyleListMap rangeStyleListMap;
+    RangeStyleBuckets rangeStyleBuckets;
     for( const auto& [rFormatKeyPair, rRangeList] : maXfIdRangeLists )
     {
-        addIfNotInMyMap( getStyles(), rangeStyleListMap, rFormatKeyPair.first, rFormatKeyPair.second, rRangeList );
+        addIfNotInMyMap( getStyles(), rangeStyleListMap, rangeStyleBuckets, rFormatKeyPair.first, rFormatKeyPair.second, rRangeList );
     }
     // gather all ranges that have the same style and apply them in bulk
     // Collect data in unsorted vectors and sort them just once at the end
@@ -374,7 +383,6 @@ void SheetDataBuffer::addColXfStyles()
 void SheetDataBuffer::addColXfStyleProcessRowRanges()
 {
     // count the number of row-range-styles we have
-    AddressConverter& rAddrConv = getAddressConverter();
     int cnt = 0;
     for ( const auto& rRange : maXfIdRowRangeList )
     {
@@ -389,10 +397,8 @@ void SheetDataBuffer::addColXfStyleProcessRowRanges()
         {
             return lhs.maRowRange.mnFirst < rhs.maRowRange.mnFirst;
         });
-    const auto nMaxCol = rAddrConv.getMaxApiAddress().Col();
-    for ( sal_Int32 nCol = 0; nCol <= nMaxCol; ++nCol )
+    auto aProcessColumn = [this, cnt](RowStyles& rRowStyles)
     {
-        RowStyles& rRowStyles = maStylesPerColumn[ nCol ];
         TmpRowStyles aTempRowStyles;
         aTempRowStyles.reserve(rRowStyles.size() + cnt);
         RowStyles::const_iterator rows_it = rRowStyles.begin();
@@ -453,7 +459,13 @@ void SheetDataBuffer::addColXfStyleProcessRowRanges()
         }
         rRowStyles.clear();
         rRowStyles.insert_sorted_unique_vector(std::move(aTempRowStyles));
-    }
+    };
+
+    // All columns without cell styles get the same result. That one can be big with many row
+    // styles and there are many such columns, so have it just once.
+    aProcessColumn( maRowStylesForUnstyledColumns );
+    for ( auto& rEntry : maStylesPerColumn )
+        aProcessColumn( rEntry.second );
 }
 
 void SheetDataBuffer::finalizeImport()
@@ -492,10 +504,20 @@ void SheetDataBuffer::finalizeImport()
     SCCOL pendingColStart = -1;
     SCCOL pendingColEnd = -1;
     ScPatternCache aPatternCache;
+    const sal_Int32 nMaxCol = getAddressConverter().getMaxApiAddress().Col();
+    // Set if the next column without cell styles and with the same default pattern would end up
+    // with the pending attributes. Not for the first such column, it may be the one creating
+    // the patterns used by applyPatternToAttrList().
+    bool bPendingRepeats = false;
+    bool bUnstyledColumnSeen = false;
+    const ScPatternAttr* pPendingDefPattern = nullptr;
 
-    for ( const auto& [rCol, rRowStyles] : maStylesPerColumn )
+    for ( sal_Int32 nCol = 0; nCol <= nMaxCol; ++nCol )
     {
-        SCCOL nScCol = static_cast< SCCOL >( rCol );
+        SCCOL nScCol = static_cast< SCCOL >( nCol );
+        const auto itColStyles = maStylesPerColumn.find( nCol );
+        const bool bUnstyledColumn = itColStyles == maStylesPerColumn.end();
+        const RowStyles& rRowStyles = bUnstyledColumn ? maRowStylesForUnstyledColumns : itColStyles->second;
 
         // tdf#91567 Get pattern from the first row without AutoFilter
         const ScPatternAttr* pDefPattern = nullptr;
@@ -515,6 +537,12 @@ void SheetDataBuffer::finalizeImport()
         }
         if ( !pDefPattern || nScRow == rDoc.MaxRow() )
             pDefPattern = &rDoc.getCellAttributeHelper().getDefaultCellAttribute();
+
+        if( bUnstyledColumn && bPendingRepeats && pendingColEnd == nScCol - 1 && pPendingDefPattern == pDefPattern )
+        {
+            ++pendingColEnd;
+            continue;
+        }
 
         Xf::AttrList aAttrs(pDefPattern);
         for ( const auto& rRowStyle : rRowStyles )
@@ -550,6 +578,10 @@ void SheetDataBuffer::finalizeImport()
             pendingColStart = pendingColEnd = nScCol;
             aPendingAttrParam = std::move( aAttrParam );
         }
+
+        bPendingRepeats = bUnstyledColumn && bUnstyledColumnSeen;
+        bUnstyledColumnSeen = bUnstyledColumnSeen || bUnstyledColumn;
+        pPendingDefPattern = pDefPattern;
     }
     if( pendingColStart != -1 )
         rDocImport.setAttrEntries(getSheetIndex(), pendingColStart, pendingColEnd, std::move(aPendingAttrParam));

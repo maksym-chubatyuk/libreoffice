@@ -40,8 +40,103 @@
 #include <svl/sharedstring.hxx>
 #include <unotools/collatorwrapper.hxx>
 
+#include <algorithm>
+#include <cmath>
+#include <iterator>
 #include <limits>
 #include <vector>
+
+namespace
+{
+/** Finds the first cell of a block that a query for a single exact value may accept.
+
+    Most cells of an exact lookup don't match, and going through ScQueryEvaluator for each of them
+    is what such a lookup spends its time on. This only rejects what ScQueryEvaluator::processEntry()
+    would reject as well, all other cells still get evaluated by it:
+    - A value query compares a numeric cell using approxEqual().
+    - A string query matching the whole cell compares a string cell by its shared string identifier.
+    - compareByString() doesn't let a value query without a string find any string cell.
+*/
+class ExactQueryBlockFilter
+{
+    bool mbNumeric = false;
+    bool mbCompareStrings = false;
+    bool mbSkipStrings = false;
+    bool mbCaseSens = false;
+    double mfQueryVal = 0.0;
+    double mfRejectDistance = 0.0;
+    const rtl_uString* mpQueryStr = nullptr;
+
+public:
+    /// @param bLinearAccess cells get visited forward by block, without stopping on a mismatch
+    ExactQueryBlockFilter(const ScQueryParam& rParam, bool bLinearAccess, bool bMatchWholeCell)
+    {
+        const ScQueryEntry& rEntry = rParam.GetEntry(0);
+        if (!bLinearAccess || !rEntry.bDoQuery || rEntry.eOp != SC_EQUAL
+            || (rParam.GetEntryCount() > 1 && rParam.GetEntry(1).bDoQuery)
+            || rEntry.GetQueryItems().size() != 1
+            || rParam.eSearchType != utl::SearchParam::SearchType::Normal)
+            return;
+
+        const ScQueryEntry::Item& rItem = rEntry.GetQueryItem();
+        if (rItem.mbMatchEmpty || rItem.mbRoundForFilter)
+            return;
+
+        if (rItem.meType == ScQueryEntry::ByValue)
+        {
+            mbNumeric = true;
+            mfQueryVal = rItem.mfVal;
+            mfRejectDistance = ScQueryEvaluator::approxEqualRejectDistance(rItem.mfVal);
+            mbSkipStrings = rItem.maString.isEmpty();
+        }
+        else if (rItem.meType == ScQueryEntry::ByString && bMatchWholeCell)
+        {
+            mbCompareStrings = true;
+            mbCaseSens = rParam.bCaseSens;
+            mpQueryStr = mbCaseSens ? rItem.maString.getData() : rItem.maString.getDataIgnoreCase();
+        }
+    }
+
+    bool handles(mdds::mtv::element_t eBlockType) const
+    {
+        if (eBlockType == sc::element_type_numeric)
+            return mbNumeric;
+        if (eBlockType == sc::element_type_string)
+            return mbSkipStrings || mbCompareStrings;
+        return false;
+    }
+
+    /// @return the offset in [nOffset, nEnd) of the first cell that may match, or nEnd
+    size_t findCandidate(const sc::CellStoreType::const_iterator& rBlock, size_t nOffset, size_t nEnd) const
+    {
+        if (rBlock->type == sc::element_type_numeric)
+        {
+            sc::numeric_block::const_iterator it = sc::numeric_block::begin(*rBlock->data);
+            std::advance(it, nOffset);
+            for (; nOffset < nEnd; ++nOffset, ++it)
+            {
+                // Not the opposite comparison, NaN has to be a candidate.
+                if (!(std::fabs(*it - mfQueryVal) > mfRejectDistance))
+                    return nOffset;
+            }
+            return nEnd;
+        }
+
+        if (mbSkipStrings)
+            return nEnd;
+
+        sc::string_block::const_iterator it = sc::string_block::begin(*rBlock->data);
+        std::advance(it, nOffset);
+        for (; nOffset < nEnd; ++nOffset, ++it)
+        {
+            const svl::SharedString& rStr = *it;
+            if ((mbCaseSens ? rStr.getData() : rStr.getDataIgnoreCase()) == mpQueryStr)
+                return nOffset;
+        }
+        return nEnd;
+    }
+};
+}
 
 template< ScQueryCellIteratorAccess accessType, ScQueryCellIteratorType queryType >
 ScQueryCellIteratorBase< accessType, queryType >::ScQueryCellIteratorBase(ScDocument& rDocument,
@@ -110,6 +205,12 @@ void ScQueryCellIteratorBase< accessType, queryType >::PerformQuery()
         assert( bAdvanceQuery );
         bAdvanceQuery = true;
     }
+
+    const ExactQueryBlockFilter aBlockFilter(maParam,
+        accessType == ScQueryCellIteratorAccess::Direct && !mbReverseSearch
+            && nStopOnMismatch == nStopOnMismatchDisabled
+            && nTestEqualCondition == nTestEqualConditionDisabled,
+        bNewSearchFunction || ScQueryEvaluator::isMatchWholeCell(rDoc, SC_EQUAL));
 
     const ScColumn* pCol = &(rDoc.maTabs[nTab])->aCol[nCol];
     while (true)
@@ -184,6 +285,27 @@ void ScQueryCellIteratorBase< accessType, queryType >::PerformQuery()
             {
                 !mbReverseSearch ? IncBlock() : DecBlock();
                 continue;
+            }
+        }
+
+        if constexpr (accessType == ScQueryCellIteratorAccess::Direct)
+        {
+            if (nRow <= maParam.nRow2 && nCol == static_cast<SCCOL>(nFirstQueryField)
+                && aBlockFilter.handles(maCurPos.first->type))
+            {
+                const size_t nBlockSize = maCurPos.first->size;
+                const size_t nEnd = std::min<size_t>(nBlockSize,
+                    maCurPos.second + static_cast<size_t>(maParam.nRow2 - nRow) + 1);
+                const size_t nFound = aBlockFilter.findCandidate(maCurPos.first, maCurPos.second, nEnd);
+                nRow += static_cast<SCROW>(nFound - maCurPos.second);
+                maCurPos.second = nFound;
+                if (nFound == nEnd)
+                {
+                    // Nothing in here, nRow is now past nRow2 unless the block ended first.
+                    if (nEnd == nBlockSize)
+                        IncBlock();
+                    continue;
+                }
             }
         }
 

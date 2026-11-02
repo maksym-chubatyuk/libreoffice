@@ -17,6 +17,9 @@
  *   the License at http://www.apache.org/licenses/LICENSE-2.0 .
  */
 
+#include <cstdlib>
+#include <new>
+
 #include <svl/listener.hxx>
 #include <sal/log.hxx>
 #include <osl/diagnose.h>
@@ -535,8 +538,11 @@ void ScBroadcastAreaSlot::FinallyEraseAreas()
 ScBroadcastAreaSlotMachine::TableSlots::TableSlots(SCSIZE nBcaSlots)
     : mnBcaSlots(nBcaSlots)
 {
-    ppSlots.reset( new ScBroadcastAreaSlot* [ nBcaSlots ] );
-    memset( ppSlots.get(), 0 , sizeof( ScBroadcastAreaSlot* ) * nBcaSlots );
+    // Almost all slots of a sheet usually stay unused. Unlike clearing them explicitly, this leaves
+    // the pages of a big array without physical memory until a slot on them gets used.
+    ppSlots.reset( static_cast<ScBroadcastAreaSlot**>( std::calloc( nBcaSlots, sizeof( ScBroadcastAreaSlot* ) ) ) );
+    if (!ppSlots)
+        throw std::bad_alloc();
 }
 
 ScBroadcastAreaSlotMachine::TableSlots::TableSlots(TableSlots&& rOther) noexcept

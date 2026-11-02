@@ -28,6 +28,8 @@
 #include <algorithm>
 #include <initializer_list>
 #include <memory>
+#include <unordered_map>
+#include <unordered_set>
 #include <utility>
 #include <comphelper/string.hxx>
 
@@ -188,10 +190,53 @@ private:
     sc::TokenStringContext maCxt;
 };
 
+/**
+ * Columns in which cells set by applySharedFormulas() may get overwritten by a later cell. Those
+ * can't be put in formula groups yet, as a group has to stay an uninterrupted run of cells.
+ */
+std::unordered_set<SCCOL> getColumnsWithOverwrittenSharedFormulas(const FormulaBuffer::SheetItem& rItem)
+{
+    std::unordered_set<SCCOL> aCols;
+
+    if (rItem.mpCellFormulas)
+    {
+        for (const FormulaBuffer::TokenAddressItem& rCell : *rItem.mpCellFormulas)
+            aCols.insert(rCell.maAddress.Col());
+    }
+
+    if (rItem.mpArrayFormulas)
+    {
+        for (const FormulaBuffer::TokenRangeAddressItem& rArray : *rItem.mpArrayFormulas)
+        {
+            aCols.insert(rArray.maTokenAndAddress.maAddress.Col());
+            for (SCCOL nCol = rArray.maRange.aStart.Col(); nCol <= rArray.maRange.aEnd.Col(); ++nCol)
+                aCols.insert(nCol);
+        }
+    }
+
+    // Rows are normally ascending, otherwise a cell could be there twice.
+    std::unordered_map<SCCOL, SCROW> aLastRows;
+    for (const FormulaBuffer::SharedFormulaDesc& rDesc : *rItem.mpSharedFormulaIDs)
+    {
+        const SCCOL nCol = rDesc.maAddress.Col();
+        const SCROW nRow = rDesc.maAddress.Row();
+        auto [it, bInserted] = aLastRows.emplace(nCol, nRow);
+        if (!bInserted)
+        {
+            if (nRow <= it->second)
+                aCols.insert(nCol);
+            it->second = nRow;
+        }
+    }
+
+    return aCols;
+}
+
 void applySharedFormulas(
     ScDocumentImport& rDoc,
     std::vector<FormulaBuffer::SharedFormulaEntry>& rSharedFormulas,
     std::vector<FormulaBuffer::SharedFormulaDesc>& rCells,
+    const std::unordered_set<SCCOL>& rOverwrittenCols,
     WorkbookHelper& rWorkbookHelper)
 {
     sc::SharedFormulaGroups aGroups;
@@ -219,6 +264,16 @@ void applySharedFormulas(
         svl::SharedStringPool& rStrPool = rDoc.getDoc().GetSharedStringPool();
         const bool bGeneratorKnownGood = rWorkbookHelper.isGeneratorKnownGood();
         bool bHasCalculatedFormulaCells = rWorkbookHelper.hasCalculatedFormulaCells();
+
+        // The previous cell of each column that can share its token array with the next one.
+        struct GroupableCell
+        {
+            ScFormulaCell* mpCell;
+            SCROW mnRow;
+            sal_Int32 mnSharedId;
+        };
+        std::unordered_map<SCCOL, GroupableCell> aGroupableCells;
+
         // Process formulas that use shared formulas.
         for (const FormulaBuffer::SharedFormulaDesc& rDesc : rCells)
         {
@@ -242,6 +297,43 @@ void applySharedFormulas(
                 pCell = new ScFormulaCell(rDoc.getDoc(), aPos, pArray->Clone());
             else
                 pCell = new ScFormulaCell(rDoc.getDoc(), aPos, *pArray);
+
+            // Group the cells right here, the same way ScColumn::RegroupFormulaCells() would do
+            // it later, as otherwise big sheets have all these token array copies in memory until
+            // then. Not cells calling AddRecalcMode() below, that must not get to the shared array.
+            const bool bHasOwnRecalcMode = rDesc.maCellValue.isEmpty()
+                || !(rDesc.mnValueType == XML_n
+                     || (rDesc.mnValueType == XML_str && bGeneratorKnownGood)
+                     || (rDesc.mnValueType == XML_b
+                         && (rDesc.maCellValue == "1" || rDesc.maCellValue == "0")));
+            if (rOrigin.Col() == aPos.Col() && !bHasOwnRecalcMode && !rDesc.mbDynamicArrayMaster
+                && !rOverwrittenCols.count(aPos.Col()))
+            {
+                auto itPrev = aGroupableCells.find(aPos.Col());
+                if (itPrev != aGroupableCells.end() && itPrev->second.mnRow + 1 == aPos.Row()
+                    && itPrev->second.mnSharedId == rDesc.mnSharedId)
+                {
+                    ScFormulaCell* pPrev = itPrev->second.mpCell;
+                    ScFormulaCellGroupRef xGroup = pPrev->GetCellGroup();
+                    if (xGroup)
+                    {
+                        pCell->SetCellGroup(xGroup);
+                        ++xGroup->mnLength;
+                    }
+                    else
+                    {
+                        const ScFormulaCell::CompareState eCompState = pPrev->CompareByTokenArray(*pCell);
+                        if (eCompState != ScFormulaCell::NotEqual)
+                        {
+                            xGroup = pPrev->CreateCellGroup(2, eCompState == ScFormulaCell::EqualInvariant);
+                            pCell->SetCellGroup(xGroup);
+                        }
+                    }
+                }
+                aGroupableCells[aPos.Col()] = GroupableCell{ pCell, aPos.Row(), rDesc.mnSharedId };
+            }
+            else
+                aGroupableCells.erase(aPos.Col());
 
             if (rDesc.mbDynamicArrayMaster)
                 pCell->SetDynamicArrayMaster(true);
@@ -519,7 +611,8 @@ void processSheetFormulaCells(
 {
     if (rItem.mpSharedFormulaEntries && rItem.mpSharedFormulaIDs)
         applySharedFormulas(rDoc, *rItem.mpSharedFormulaEntries,
-                            *rItem.mpSharedFormulaIDs, rWorkbookHelper);
+                            *rItem.mpSharedFormulaIDs,
+                            getColumnsWithOverwrittenSharedFormulas(rItem), rWorkbookHelper);
 
     if (rItem.mpCellFormulas)
     {

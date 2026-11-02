@@ -267,26 +267,26 @@ std::pair<bool, bool> ScQueryEvaluator::compareByValue(const ScRefCellValue& rCe
     switch (rEntry.eOp)
     {
         case SC_EQUAL:
-            bOk = ::rtl::math::approxEqual(nCellVal, fQueryVal);
+            bOk = approxEqualFast(nCellVal, fQueryVal);
             break;
         case SC_LESS:
-            bOk = (nCellVal < fQueryVal) && !::rtl::math::approxEqual(nCellVal, fQueryVal);
+            bOk = (nCellVal < fQueryVal) && !approxEqualFast(nCellVal, fQueryVal);
             break;
         case SC_GREATER:
-            bOk = (nCellVal > fQueryVal) && !::rtl::math::approxEqual(nCellVal, fQueryVal);
+            bOk = (nCellVal > fQueryVal) && !approxEqualFast(nCellVal, fQueryVal);
             break;
         case SC_LESS_EQUAL:
-            bOk = (nCellVal < fQueryVal) || ::rtl::math::approxEqual(nCellVal, fQueryVal);
+            bOk = (nCellVal < fQueryVal) || approxEqualFast(nCellVal, fQueryVal);
             if (bOk && mpTestEqualCondition)
-                bTestEqual = ::rtl::math::approxEqual(nCellVal, fQueryVal);
+                bTestEqual = approxEqualFast(nCellVal, fQueryVal);
             break;
         case SC_GREATER_EQUAL:
-            bOk = (nCellVal > fQueryVal) || ::rtl::math::approxEqual(nCellVal, fQueryVal);
+            bOk = (nCellVal > fQueryVal) || approxEqualFast(nCellVal, fQueryVal);
             if (bOk && mpTestEqualCondition)
-                bTestEqual = ::rtl::math::approxEqual(nCellVal, fQueryVal);
+                bTestEqual = approxEqualFast(nCellVal, fQueryVal);
             break;
         case SC_NOT_EQUAL:
-            bOk = !::rtl::math::approxEqual(nCellVal, fQueryVal);
+            bOk = !approxEqualFast(nCellVal, fQueryVal);
             break;
         default:
             assert(false);

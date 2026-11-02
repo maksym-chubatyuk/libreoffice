@@ -3325,6 +3325,17 @@ bool operator==( const XfModel& rXfModel1,  const XfModel& rXfModel2 )
         rXfModel1.mbProtUsed == rXfModel2.mbProtUsed );
 }
 
+size_t Xf::getModelHash() const
+{
+    // Only members compared by operator==(XfModel), and the same for all equal ones.
+    size_t nHash = static_cast<size_t>(maModel.mnStyleXfId);
+    nHash = nHash * 31 + static_cast<size_t>(maModel.mnFontId);
+    nHash = nHash * 31 + static_cast<size_t>(maModel.mnNumFmtId);
+    nHash = nHash * 31 + static_cast<size_t>(maModel.mnBorderId);
+    nHash = nHash * 31 + static_cast<size_t>(maModel.mnFillId);
+    return nHash;
+}
+
 bool operator==( const Xf& rXf1, const Xf& rXf2 )
 {
     if ( rXf1.maModel == rXf2.maModel )
